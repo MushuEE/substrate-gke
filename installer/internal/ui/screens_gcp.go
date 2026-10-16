@@ -124,8 +124,9 @@ type projectScreen struct {
 
 // submitTimeout bounds a submit's checks as a whole. A healthy run takes a
 // few seconds; with the network down each gcloud call would otherwise wait
-// its own cmdTimeout, one after the other.
-const submitTimeout = 30 * time.Second
+// its own cmdTimeout, one after the other. A var only so tests can shorten
+// it.
+var submitTimeout = 30 * time.Second
 
 // enableCheckTimeout bounds the billing check after a failed enable. The
 // enable often failed because the network is down, and the panel it
@@ -273,14 +274,13 @@ func (s *projectScreen) submit() tea.Cmd {
 		// instead of paying a second cold gcloud spawn after it.
 		go s.deps.GCP.WarmToken(context.Background())
 		msg.number, msg.err = projectNumber(ctx, pid)
-		if msg.err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg.err = fmt.Errorf("timed out after %v looking up project %s: %w", submitTimeout, pid, msg.err)
-		}
+		msg.err = deadlineHit(ctx, msg.err, "looking up project "+pid)
 		// The cluster step lists clusters next, and that fails outright on
 		// a project without billing or without the GKE API. Catch both
 		// here, where the fix is still one command away.
 		if msg.err == nil {
 			msg.billingOff, msg.apiOff, msg.probeErr = projectServing(ctx, s.deps.GCP, pid)
+			msg.probeErr = deadlineHit(ctx, msg.probeErr, "")
 		}
 		// No billing or no API blocks the step, and Update then shows
 		// that alone, so the checks below would be paid for and thrown
@@ -290,8 +290,13 @@ func (s *projectScreen) submit() tea.Cmd {
 		// screens later, mid-provision. Skipped once acknowledged.
 		if !blocked && !acked {
 			msg.missing, msg.permErr = s.deps.GCP.MissingPermissions(ctx, pid, repositoryPermissions...)
+			msg.permErr = deadlineHit(ctx, msg.permErr, "")
 		}
-		if !blocked && registry != "" {
+		// Not once the deadline has passed (or esc has cancelled): every
+		// docker check would fail at once on the dead context, and Update
+		// shows a docker failure ahead of probeErr/permErr, hiding the
+		// "timed out" that is the real story.
+		if !blocked && registry != "" && ctx.Err() == nil {
 			for _, c := range doctor.DockerChecks(registry) {
 				if res := c.Run(ctx); res.Status == doctor.Fail {
 					msg.docker = append(msg.docker, failedCheck{c.Name, res})
@@ -300,6 +305,22 @@ func (s *projectScreen) submit() tea.Cmd {
 		}
 		return msg
 	}
+}
+
+// deadlineHit says so when err came from the submit's own deadline, so a
+// check cut off by submitTimeout reads as that rather than as an API fault
+// ("…: context deadline exceeded"). doing names the step when the panel
+// showing err does not already (the project lookup's raw error has no
+// context of its own); "" leaves just the time. Any other err is returned
+// unchanged.
+func deadlineHit(ctx context.Context, err error, doing string) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	if doing == "" {
+		return fmt.Errorf("timed out after %v: %w", submitTimeout, err)
+	}
+	return fmt.Errorf("timed out after %v %s: %w", submitTimeout, doing, err)
 }
 
 // abandonValidation stops waiting for a submit's checks (esc): they are

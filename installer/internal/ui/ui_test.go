@@ -973,6 +973,65 @@ func TestProjectScreenSubmitIsBoundedAndCancellable(t *testing.T) {
 	}
 }
 
+// A check cut off by the submit's own deadline says so, whichever check it
+// was: the project lookup names its step, and the probe and IAM errors,
+// whose panels already name theirs, just gain the time. An error from a
+// live context, or no error, is passed through unchanged.
+func TestDeadlineHitWordsSubmitTimeouts(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	probe := errors.New(`reading billing info for acme: Get "https://cloudbilling.googleapis.com/…": context deadline exceeded`)
+
+	if got := deadlineHit(expired, probe, ""); !strings.HasPrefix(got.Error(), "timed out after 30s: reading billing info") || !errors.Is(got, probe) {
+		t.Errorf("probe error at the deadline = %q, want it prefixed with the submit timeout and still wrapping the original", got)
+	}
+	if got := deadlineHit(expired, probe, "looking up project acme"); !strings.HasPrefix(got.Error(), "timed out after 30s looking up project acme: ") {
+		t.Errorf("lookup error at the deadline = %q, want it to name the step", got)
+	}
+	if got := deadlineHit(context.Background(), probe, ""); got != probe {
+		t.Errorf("an error from a live context should pass through unchanged, got %q", got)
+	}
+	if got := deadlineHit(expired, nil, ""); got != nil {
+		t.Errorf("no error should stay no error, got %v", got)
+	}
+}
+
+// On a track that builds with docker, the docker checks must not run once
+// the submit's deadline has passed: on the dead context every one of them
+// fails at once ("daemon is not running"), and Update shows that docker
+// panel ahead of probeErr/permErr, hiding the "timed out" that is the real
+// story. Here the lookup returns only as the deadline fires, so everything
+// after it would run on the expired context.
+func TestProjectScreenSkipsDockerChecksAfterTheDeadline(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	defer func(d time.Duration) { submitTimeout = d }(submitTimeout)
+	submitTimeout = 20 * time.Millisecond
+
+	app := testApp(t)
+	app.deps.DryRun = false
+	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	app.deps.Setup.Track = state.TrackAdvanced
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
+	scr := newProjectScreen(app.deps)
+	scr.fields[0].input.SetValue("acme")
+	scr.fields[scr.repositoryField-1].input.SetValue("us-docker.pkg.dev/acme/ate")
+	if st := scr.inputSetup("acme"); scr.dockerRegistry(&st) == "" {
+		t.Fatal("setup: this install should build with docker")
+	}
+	scr.projectNumber = func(ctx context.Context, _ string) (string, error) {
+		<-ctx.Done()
+		return "42", nil
+	}
+
+	msg, ok := scr.submit()().(projValidMsg)
+	if !ok {
+		t.Fatal("submit should produce a projValidMsg")
+	}
+	if len(msg.docker) != 0 {
+		t.Errorf("docker checks ran on the expired context and reported %d bogus failures, first: %+v", len(msg.docker), msg.docker[0])
+	}
+}
+
 // startHungCheck drives a failing enable up to the billing check, whose
 // billingCheck blocks until its context ends, and returns the check's
 // command unrun along with the context the check was handed.
