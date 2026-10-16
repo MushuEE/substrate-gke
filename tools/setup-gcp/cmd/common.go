@@ -52,7 +52,9 @@ type Config struct {
 	BootDiskSizeGB             int32
 	BootDiskType               string
 
-	BucketName string
+	BucketName                 string
+	ArtifactRegistryRepository string
+	CreateArtifactRepository   bool
 
 	CloudSQLInstance  string
 	CloudSQLTier      string

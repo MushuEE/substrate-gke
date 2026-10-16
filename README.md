@@ -6,7 +6,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 > **New here?** Run `make dry-run` first — it walks the entire wizard without touching GCP, so you can see every prompt before committing to anything.
 
 > [!WARNING]
-> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, and monitoring dashboards. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
+> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
 
 ![The installer's welcome screen](docs/screenshots/welcome.svg)
 
@@ -34,7 +34,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | `git` | — |
 | `kubectl` | — |
 | `gke-gcloud-auth-plugin` | `gcloud components install gke-gcloud-auth-plugin`, or the `google-cloud-cli-gke-gcloud-auth-plugin` package when gcloud came from apt or dnf |
-| Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker gcr.io` |
+| Docker with buildx | Only to build Substrate 0.2 or later from source, which builds its envoy-dataplane image with `docker buildx`. Docker also needs credentials for your registry: `gcloud auth configure-docker <registry-host>` |
 | A GCP project with billing | Checked on the project step, which can also enable the GKE API for you |
 
 ```bash
@@ -66,9 +66,9 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 |---|---|---|
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
-| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. A build from source that needs Docker re-checks it here against your registry |
+| 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one. Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, and monitoring dashboards. Idempotent |
+| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
@@ -187,6 +187,8 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Just getting Substrate running | A branch or commit with no published images |
 
+For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
+
 > [!IMPORTANT]
 > If you point at a custom registry/tag, **move the commit with it.** Only the release registry is guaranteed to match its tags — images from anywhere else need the commit they were built from, or they'll run behind manifests from a different Substrate. The wizard warns you as soon as the registry or tag changes.
 
@@ -243,11 +245,13 @@ Every command's full output is written to a timestamped log under `<user cache d
 
 That flow names the cluster, reads what it currently runs, takes the new version from the images step, fetches both the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`, and prints the hand-over in runbook order for upstream's [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md): the runbook itself, the variables its commands use, which tree to check out, the environment for `ate-setup`, and what a rollback changes. **Nothing on the cluster changes until you follow the runbook.**
 
-The installed tree is fetched at the commit the running API server reports it was built from (Go stamps every binary; `ateapi --version` prints it). If the cluster can't be read, or the binary carries no commit, you'll be prompted to enter the commit, version, and — for pre-built images — the registry.
+When a source upgrade needs the default Artifact Registry repository, the hand-over includes its setup commands.
+
+The installed tree is fetched at the commit the running API server reports it was built from (Go stamps every binary; `ateapi --version` prints it). If the cluster can't be read, or the binary carries no commit, you'll be prompted to enter the commit, version, and image registry. For source builds, enter the registry the images were pushed to.
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, and monitoring dashboards.
+An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
@@ -258,7 +262,9 @@ make teardown PROJECT_ID=<project> CLUSTER_NAME=<cluster> CLUSTER_LOCATION=<zone
 > [!TIP]
 > The exit summary from your install prints this exact invocation pre-filled — copy it from there rather than retyping values.
 
-The script asks for confirmation, then delegates deletion to [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh), the reverse of `setup-gcp bootstrap`, which moved here from upstream's `hack/teardown.sh` with setup-gcp. It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Resources that are already gone count as deleted, so it is safe to re-run after a partial failure. Any other failed step makes it exit non-zero and is listed at the end, so a run that ends without that list deleted everything.
+The script asks for confirmation, then runs this repository's [`tools/setup-gcp/teardown.sh`](tools/setup-gcp/teardown.sh). It needs only `gcloud`. `cleanup-gcp` sets `NO_DEV_ENV=1`, so `teardown.sh` ignores any `.ate-dev-env.sh` in the working directory; run directly, `teardown.sh` sources that file. Already-deleted resources are skipped. Failed deletion steps are listed at the end, and the script exits non-zero.
+
+Repositories are kept by default; the installer adds `--delete-repository` when it provisioned one, and `--repository` if the name is not `ate-images`. The region is derived from the cluster location. Replace `--delete-repository` with `--keep-repository` if the images are shared. With `make teardown`, use `DELETE_REPOSITORY=true` and, for a custom name, pass `ARTIFACT_REGISTRY_REPOSITORY=<name>` on the command line.
 
 To remove **only** the Substrate control plane and keep the cluster:
 
