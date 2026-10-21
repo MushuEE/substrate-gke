@@ -369,12 +369,12 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("enter")
 	// Project screen in Advanced track:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
-	// 5:Subnetwork, 6:ClusterVersion, 7:Repo, 8:RepositoryName
+	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel, 8:Repo, 9:RepositoryName
 	press("enter", "enter")
 	for _, r := range "my-custom-bucket" {
 		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	press("enter", "enter", "enter", "enter", "enter", "enter", "enter") // submit from field 8
+	press("enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter") // submit from field 9
 
 	// Cluster screen: pick row 2 (legacy-prod)
 	press("2", "enter")
@@ -2183,7 +2183,7 @@ func TestAnUnreadableControlPlaneOverGoodPoolsPromisesNoReplacement(t *testing.T
 // The cluster version and release channel only matter when the run creates a
 // cluster, so they are advanced-track fields — but they have to actually be
 // reachable there, and to reach upstream with whatever the user typed.
-func TestAdvancedTrackOffersTheClusterVersion(t *testing.T) {
+func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	for _, m := range runCmd(app.Init()) {
@@ -2215,18 +2215,25 @@ func TestAdvancedTrackOffersTheClusterVersion(t *testing.T) {
 		t.Fatalf("default version=%q, want %q", st.ClusterVersion, state.DefaultClusterVersion)
 	}
 
+	if st.ReleaseChannel != state.DefaultReleaseChannel {
+		t.Fatalf("default channel=%q, want %q", st.ReleaseChannel, state.DefaultReleaseChannel)
+	}
+
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket, 3:MachineType, 4:Network,
-	// 5:Subnetwork, 6:ClusterVersion
+	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel
 	press("enter", "enter", "enter", "enter", "enter", "enter")
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.38")
+	typed("1.36")
+	press("enter") // to the channel field
+	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
+	typed("regular")
 	press("enter") // submit from the last field
 
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
 	}
-	if st.ClusterVersion != "1.38" {
-		t.Errorf("edited: version=%q, want 1.38", st.ClusterVersion)
+	if st.ClusterVersion != "1.36" || st.ReleaseChannel != "regular" {
+		t.Errorf("edited: version=%q channel=%q, want 1.36 on regular", st.ClusterVersion, st.ReleaseChannel)
 	}
 }
 
@@ -2261,7 +2268,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("1.35")
-	press("enter")
+	press("enter", "enter") // past the channel field, then submit
 	if app.mach.Current() != state.Project {
 		t.Fatalf("1.35 was accepted: step=%v, want to stay on the project screen", app.mach.Current())
 	}
@@ -2270,7 +2277,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 	}
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	press("enter")
+	press("enter", "enter")
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("an empty version was refused: step=%v, want Cluster", app.mach.Current())
 	}
@@ -2515,6 +2522,95 @@ func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
 	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || (st.ReplacePools.Needed && !st.ReplacePools.Unsure) {
 		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%+v, want nothing to enable and any pool advice unsure",
 			st.ClusterName, st.EnableBetaAPIs, st.ReplacePools)
+	}
+}
+
+// The version and channel have to go together, or GKE refuses the create:
+// a channel only offers the versions it carries, and today 1.37 is in Rapid
+// alone. The installer asks GKE which channel carries what (canned under
+// --dry-run) and says so on the project screen, pointing at a channel that
+// works. It is a warning, not a wall: submitting the same pair again goes on,
+// because the pair only matters if the next step creates a cluster, and GKE
+// rolls versions out per location. When no channel offers the version, the
+// cursor goes to the version, the field to change. Extended can never work,
+// since it refuses the beta APIs setup-gcp turns on, so it is refused outright.
+func TestTheChannelHasToOfferTheVersion(t *testing.T) {
+	// The project screen alone, not a walk through the wizard to reach it:
+	// the walk cost ~35 s of the ui package's 10-minute budget.
+	deps := testApp(t).deps
+	deps.Setup.Track = state.TrackAdvanced
+	deps.Setup.ImageRepo, deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	deps.Setup.ProjectID = "acme"
+	scr := newProjectScreen(deps)
+	set := func(label, value string) {
+		_, at := scr.fieldValue(label)
+		scr.fields[at].input.SetValue(value)
+	}
+	// submit runs one submit through to its result and reports whether the
+	// screen moved on.
+	submit := func() bool {
+		advanced := false
+		for _, m := range runCmd(scr.submit()) {
+			for _, n := range runCmd(scr.Update(m)) {
+				if n == navNext {
+					advanced = true
+				}
+			}
+		}
+		return advanced
+	}
+
+	set(clusterVersionLabel, "1.99")
+	if submit() || !strings.Contains(scr.errText, "no channel that offers version 1.99") {
+		t.Fatalf("1.99 should be flagged, got %q", scr.errText)
+	}
+	if _, at := scr.fieldValue(clusterVersionLabel); scr.focus != at {
+		t.Errorf("no channel offers the version, so the cursor belongs on the version field; focus=%d want %d", scr.focus, at)
+	}
+
+	set(clusterVersionLabel, "1.37")
+	set(releaseChannelLabel, "extended")
+	if submit() || !strings.Contains(scr.errText, "extended channel does not allow the beta APIs") {
+		t.Errorf("extended should be refused with its reason, got %q", scr.errText)
+	}
+
+	set(releaseChannelLabel, "regular")
+	if submit() {
+		t.Fatal("1.37 on regular went through without a word")
+	}
+	if !strings.Contains(scr.errText, "regular channel does not offer version 1.37") || !strings.Contains(scr.errText, "rapid does") {
+		t.Errorf("the warning should say regular lacks 1.37 and rapid has it, got %q", scr.errText)
+	}
+
+	// An edit anywhere re-arms the warning: the check is per location, so
+	// acknowledging it for one zone must not wave a different zone through.
+	// A real keystroke, since that is where the reset lives.
+	scr.setFocus(1) // the zone
+	scr.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	set("Cluster location (zone)", "us-central1-a")
+	if submit() || !strings.Contains(scr.errText, "regular channel does not offer version 1.37 in us-central1-a") {
+		t.Fatalf("after editing the zone the warning should come back, got %q", scr.errText)
+	}
+
+	if !submit() || deps.Setup.ReleaseChannel != "regular" {
+		t.Errorf("a second submit of the same pair should go on: channel=%q err=%q", deps.Setup.ReleaseChannel, scr.errText)
+	}
+}
+
+// The channel lookup is advisory and silent when GKE cannot be asked, except
+// when it is what ran out the submit's deadline: then it has to say "timed
+// out" like every other check (#59), or the submit advances after 30 seconds
+// with no word. Esc cancels rather than times out, and that stays silent.
+func TestAChannelLookupThatTimesOutSaysSo(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if problem, _ := channelProblem(expired, &gcp.Client{}, "acme", "us-central1-a", "1.37", "rapid"); !strings.Contains(problem, "timed out") {
+		t.Errorf("a lookup cut off by the deadline should say so, got %q", problem)
+	}
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	if problem, _ := channelProblem(cancelled, &gcp.Client{}, "acme", "us-central1-a", "1.37", "rapid"); problem != "" {
+		t.Errorf("a cancelled lookup should stay silent, got %q", problem)
 	}
 }
 
