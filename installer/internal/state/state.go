@@ -274,10 +274,9 @@ type Setup struct {
 	ClusterDataplaneV2 bool
 
 	// ClusterFilestoreAddon records that the existing cluster had GKE's
-	// managed Filestore CSI driver on. Provision's bootstrap turns it off
-	// (agent-substrate/substrate#2357), before the user has decided whether
-	// the optional Filestore step installs Substrate's replacement, so both
-	// screens say so.
+	// managed Filestore CSI driver on. Bootstrap leaves it alone; the
+	// optional Filestore step turns it off before installing Substrate's
+	// driver, so that step warns about it.
 	ClusterFilestoreAddon bool
 
 	// EnableBetaAPIs records that the chosen existing cluster lacks the beta

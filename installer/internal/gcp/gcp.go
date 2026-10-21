@@ -138,9 +138,9 @@ type Cluster struct {
 	Subnetwork  string
 	DataplaneV2 bool
 	// FilestoreCSIAddon reports whether GKE's managed Filestore CSI driver is
-	// enabled. Bootstrap turns it off on an existing cluster
-	// (agent-substrate/substrate#2357), so the installer warns before that
-	// happens to a cluster whose workloads may be using it.
+	// enabled. The optional Filestore step turns it off before installing
+	// Substrate's driver, so the installer warns before that happens to a
+	// cluster whose workloads may be using it.
 	FilestoreCSIAddon bool
 	// PoolVersions is each node pool's name and Kubernetes version, in
 	// gcloud's order. Empty when gcloud listed no pools (Autopilot) or for a
@@ -407,9 +407,8 @@ func (c *Client) ListClusters(ctx context.Context, projectID string) ([]Cluster,
 		// replace pools; substrate-ga lacks them and needs none. The last two
 		// names are also cues for CheckInstalled's sim, which supplies the
 		// installed and partial states of the reinstall guard. substrate-ga has
-		// the managed Filestore driver on, so its provision and Filestore steps
-		// show that warning; it is the one ready cluster that provision does
-		// not end on a pool check, so the warning stays on screen.
+		// the managed Filestore driver on, so its Filestore step shows that
+		// warning.
 		return []Cluster{
 			{Name: "substrate-poc", Location: "us-west1-c", Status: "RUNNING",
 				MasterVersion: "1.36.4-gke.1247000", NodeCount: 2, BetaAPIs: RequiredBetaAPIs, KVMReady: true},

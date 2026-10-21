@@ -1900,10 +1900,10 @@ func TestListBackgroundProbesReadyClusters(t *testing.T) {
 
 // A --dry-run walkthrough shows the guard's whole story off the fixture
 // clusters: badges from the background probes, the blocked panel, a
-// simulated teardown that ends clean instead of replaying "installed", and the
-// warning that provision turns off a cluster's managed Filestore driver. A
-// screen nobody can reach without a GCP project is a screen that regresses
-// unseen.
+// simulated teardown that ends clean instead of replaying "installed", and a
+// provision screen that no longer warns about a cluster's managed Filestore
+// driver, since bootstrap leaves it alone. A screen nobody can reach without a
+// GCP project is a screen that regresses unseen.
 func TestDryRunShowsGuardStates(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -1930,8 +1930,8 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	poc := testApp(t)
 	press = pressToCluster(t, poc)
 	press("4", "enter") // substrate-ga, ready, managed Filestore driver on
-	if poc.mach.Current() != state.Provision || !strings.Contains(poc.cur.View(120), "managed Filestore CSI driver") {
-		t.Errorf("substrate-ga: step=%v, want Provision with the Filestore warning:\n%s", poc.mach.Current(), poc.cur.View(120))
+	if poc.mach.Current() != state.Provision || strings.Contains(poc.cur.View(120), "Filestore") {
+		t.Errorf("substrate-ga: step=%v, want Provision without a Filestore warning:\n%s", poc.mach.Current(), poc.cur.View(120))
 	}
 }
 
@@ -1982,12 +1982,11 @@ func TestChoosingAnExistingClusterRecordsItsOwnNetwork(t *testing.T) {
 	}
 }
 
-// Provision's bootstrap turns off GKE's managed Filestore CSI driver on an
-// existing cluster (agent-substrate/substrate#2357), before the user has
-// chosen whether the optional Filestore step installs Substrate's. Workloads
-// on Filestore volumes lose their driver at that moment, so the user has to
-// hear it then — and hear again, at the Filestore step, that skipping leaves
-// the cluster with none. A new cluster has no such workloads and gets neither.
+// Bootstrap leaves GKE's managed Filestore CSI driver alone, so provision says
+// nothing about it. The optional Filestore step turns it off before installing
+// Substrate's driver, so on an existing cluster with the driver on that step
+// warns, and its skip option says the managed driver stays. A new cluster has
+// the driver off and gets no warning.
 func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
 	deps := &Deps{
 		Setup:   state.NewSetup(),
@@ -1998,19 +1997,19 @@ func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
 	st := deps.Setup
 	st.ProjectID, st.ClusterName, st.ClusterIsNew, st.ClusterFilestoreAddon = "acme", "prod", false, true
 
-	if view := newProvisionScreen(deps).View(120); !strings.Contains(view, "turns off GKE's managed Filestore CSI driver") {
-		t.Errorf("provision should warn that the managed Filestore driver is turned off:\n%s", view)
+	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
+		t.Errorf("provision should not mention the managed Filestore driver:\n%s", view)
 	}
-	if view := newFilestoreScreen(deps).View(120); !strings.Contains(view, "already turned off") || !strings.Contains(view, "no Filestore CSI driver") {
-		t.Errorf("the Filestore step should say the driver is already off and skipping leaves none:\n%s", view)
+	if view := flat(newFilestoreScreen(deps).View(120)); !strings.Contains(view, "Installing turns it off first") || !strings.Contains(view, "keep GKE's managed Filestore CSI driver") {
+		t.Errorf("the Filestore step should say installing turns the driver off and skipping keeps it:\n%s", view)
 	}
 
 	st.ClusterIsNew = true
 	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
 		t.Errorf("a new cluster should get no Filestore warning:\n%s", view)
 	}
-	if view := newFilestoreScreen(deps).View(120); strings.Contains(view, "already turned off") {
-		t.Errorf("a new cluster's Filestore step should not claim the driver was turned off:\n%s", view)
+	if view := flat(newFilestoreScreen(deps).View(120)); strings.Contains(view, "is on for this cluster") {
+		t.Errorf("a new cluster's Filestore step should not claim the managed driver is on:\n%s", view)
 	}
 }
 

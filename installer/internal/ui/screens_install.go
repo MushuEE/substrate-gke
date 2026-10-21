@@ -161,22 +161,14 @@ func (s *provisionScreen) View(w int) string {
 	case st.EnableBetaAPIs:
 		// The cluster screen has just told the user this update is coming,
 		// and it is rarely the only one. Bootstrap reconciles Workload
-		// Identity, managed OpenTelemetry and the Filestore CSI driver too,
-		// each its own control-plane update of about the same length; on a
-		// cluster it did not create, a run of forty minutes was measured.
+		// Identity and managed OpenTelemetry too, each its own control-plane
+		// update of about the same length; on a cluster it did not create, a
+		// run of forty minutes was measured.
 		b.WriteString(sub.Render(fmt.Sprintf(
 			"Turning on the beta PodCertificate APIs for %s: about ten minutes, and bootstrap may make other control-plane updates of the same length. Then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	default:
 		b.WriteString(sub.Render(fmt.Sprintf(
 			"Cluster %s already exists. Bootstrap fills in the bucket, IAM, and dashboards, and updates the cluster only where it differs from what Substrate needs.", st.ClusterName)) + "\n\n")
-	}
-	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
-		// Said here, as it happens, rather than left for the Filestore step
-		// to mention afterward: by then the driver is already off, and a
-		// user who skips that step has none at all. Wrapped to the content
-		// width, or Bubble Tea's renderer cuts it at the edge.
-		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render(
-			"Bootstrap also turns off GKE's managed Filestore CSI driver on this cluster. Pods using Filestore volumes lose their driver until the Filestore step installs Substrate's.") + "\n\n")
 	}
 	if s.checkingDocker {
 		b.WriteString("Checking Docker and registry credentials...\n")
@@ -693,13 +685,13 @@ func (s *filestoreScreen) View(w int) string {
 	st := s.deps.Setup
 	skip := "[2] Skip — I'll configure storage drivers later"
 	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
-		// Provision has already turned the managed driver off, so the usual
-		// note would describe something that has happened as something that
-		// might, and "skip" would hide that it leaves the cluster with no
-		// Filestore driver at all.
+		// The managed driver is on and may be serving workloads. Installing
+		// turns it off before Substrate's driver is up, so say that here;
+		// skipping leaves the managed driver as it is. Wrapped to the
+		// content width, or Bubble Tea's renderer cuts it at the edge.
 		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render("Optional: install GCP Filestore CSI Driver configured for Substrate.") + "\n")
-		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("Provision already turned off GKE's managed Filestore CSI driver on this cluster. Skipping leaves it with no Filestore CSI driver.") + "\n\n")
-		skip = "[2] Skip — the cluster then has no Filestore CSI driver"
+		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("GKE's managed Filestore CSI driver is on for this cluster. Installing turns it off first, so pods using Filestore volumes lose their driver until Substrate's is running.") + "\n\n")
+		skip = "[2] Skip — keep GKE's managed Filestore CSI driver"
 	} else {
 		b.WriteString(theme.Subtle.Render("Optional: install GCP Filestore CSI Driver configured for Substrate.\nNote: This will disable the managed Filestore CSI driver if enabled.") + "\n\n")
 	}
