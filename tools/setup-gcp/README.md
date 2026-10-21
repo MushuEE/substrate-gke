@@ -305,7 +305,7 @@ projects where you cannot run the tool with project-level IAM permissions.
 atelet and ate-api authenticate via [GKE Workload Identity
 Federation](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity):
 their Kubernetes ServiceAccounts (`ate-system/atelet` and
-`ate-system/ate-api-server`, created by `install-ate.sh`) are addressed
+`ate-system/ate-api-server`, created by `ate-setup`) are addressed
 directly as IAM principals — no Google service account is created or
 impersonated. This only works on a cluster with Workload Identity enabled
 (`create cluster` enables the `PROJECT_ID.svc.id.goog` pool; a pre-existing

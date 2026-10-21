@@ -22,7 +22,7 @@ authentication**](https://docs.cloud.google.com/sql/docs/postgres/iam-authentica
   sidecar is a deployment-time patch
   (`manifests/ate-install/cloudsql/proxy-sidecar-patch.yaml` in
   agent-substrate/substrate) applied by that repository's
-  `hack/install-ate.sh` only when a Cloud SQL instance is configured.
+  `cmd/ate-setup` only when a Cloud SQL instance is configured.
 
 ## 1. Provision
 
@@ -124,8 +124,8 @@ Run from the root of an agent-substrate/substrate checkout:
 ```sh
 export ATE_API_POSTGRES_CLOUDSQL_INSTANCE=<project>:<region>:<instance>
 export ATE_API_POSTGRES_CLOUDSQL_GSA=ate-api-server@<project>.iam.gserviceaccount.com
-./hack/install-ate.sh --deploy-ate-system --credential-provider='{"name":"k8s.io"}'
-# Existing installation: --deploy-ate-apiserver instead of --deploy-ate-system
+go run ./cmd/ate-setup deploy ate-system --credential-provider='{"name":"k8s.io"}'
+# Existing installation: deploy apiserver instead of deploy ate-system
 ```
 
 What this does differently from a plain install:
