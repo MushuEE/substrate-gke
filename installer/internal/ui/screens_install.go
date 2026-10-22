@@ -173,7 +173,9 @@ func (s *provisionScreen) View(w int) string {
 	if s.checkingDocker {
 		b.WriteString("Checking Docker and registry credentials...\n")
 	} else if s.dockerError != "" {
-		b.WriteString(theme.Bad.Render(s.dockerError))
+		// Wrapped to the content width, or Bubble Tea's renderer cuts the
+		// detail and fix lines at the edge.
+		b.WriteString(theme.Bad.Width(max(w-2, 20)).Render(s.dockerError))
 	} else {
 		b.WriteString(s.comp.view(w))
 	}

@@ -3384,6 +3384,34 @@ func TestExecCompPromptOnlyForCommands(t *testing.T) {
 	}
 }
 
+// The provision screen's docker failure carries long detail and fix lines. It
+// has to wrap to the screen, or the renderer cuts them at the edge and the
+// fix command is lost.
+func TestProvisionDockerErrorWrapsToTheScreen(t *testing.T) {
+	app := testApp(t)
+	provision := newProvisionScreen(app.deps)
+	provision.dockerError = dockerProblem([]failedCheck{{
+		name: "Docker credentials for us-west1-docker.pkg.dev",
+		res: doctor.Result{
+			Status: doctor.Fail,
+			Detail: "docker has no credentials for us-west1-docker.pkg.dev in /home/someone/.docker/config.json; ko pushes with gcloud's, but the envoy-dataplane push would be refused",
+			Fix:    "gcloud auth configure-docker us-west1-docker.pkg.dev",
+		},
+	}}, "r")
+	const width = 80
+	view := provision.View(width)
+	for i, line := range strings.Split(view, "\n") {
+		if lipgloss.Width(line) > width {
+			t.Errorf("line %d is %d wide, past %d:\n%s", i, lipgloss.Width(line), width, line)
+		}
+	}
+	for _, want := range []string{"the envoy-dataplane push would be refused", "gcloud auth configure-docker us-west1-docker.pkg.dev", "ATE_ATENET_DATAPLANE=agentgateway"} {
+		if !strings.Contains(flat(view), want) {
+			t.Errorf("view lost %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
 	app := testApp(t)
