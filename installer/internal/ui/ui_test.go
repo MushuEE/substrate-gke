@@ -532,19 +532,20 @@ func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
 
 	scr := newProjectScreen(app.deps)
 	st := scr.inputSetup("acme")
-	if got := scr.dockerRegistry(&st); got != "" {
+	if got, _ := scr.dockerRegistry(&st); got != "" {
 		t.Errorf("the pin builds nothing with docker, got registry %q", got)
 	}
 	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: true})
 	scr = newProjectScreen(app.deps)
+	scr.fields[1].input.SetValue("europe-west4-a")
 	st = scr.inputSetup("acme")
-	if got := scr.dockerRegistry(&st); got != "" {
-		t.Errorf("default registry must wait for cluster selection, got %q", got)
+	if got, guessed := scr.dockerRegistry(&st); got != "europe-west4-docker.pkg.dev/acme/ate-images" || !guessed {
+		t.Errorf("dockerRegistry = %q, %v; want the default registry in the zone's region, guessed", got, guessed)
 	}
 	scr.fields[scr.repositoryField-1].input.SetValue("us-docker.pkg.dev/acme/ate")
 	st = scr.inputSetup("acme")
-	if got := scr.dockerRegistry(&st); got != "us-docker.pkg.dev/acme/ate" {
-		t.Errorf("dockerRegistry = %q, want the typed registry", got)
+	if got, guessed := scr.dockerRegistry(&st); got != "us-docker.pkg.dev/acme/ate" || guessed {
+		t.Errorf("dockerRegistry = %q, %v; want the typed registry, not guessed", got, guessed)
 	}
 	if app.deps.Setup.KoDockerRepo != "" {
 		t.Error("probing the registry must not commit it before the project validates")
@@ -552,7 +553,7 @@ func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
 	app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
 	scr = newProjectScreen(app.deps)
 	st = scr.inputSetup("acme")
-	if got := scr.dockerRegistry(&st); got != "" {
+	if got, _ := scr.dockerRegistry(&st); got != "" {
 		t.Errorf("a pre-built install builds nothing with docker, got registry %q", got)
 	}
 }
@@ -575,8 +576,45 @@ func TestProjectScreenBlocksOnDocker(t *testing.T) {
 	if scr.permAcked {
 		t.Error("a docker failure must not count as acknowledging a permission problem")
 	}
+	if cmd := scr.Update(failed); cmd != nil {
+		t.Fatal("a second failure on a registry the user typed must still block")
+	}
 	if cmd := scr.Update(projValidMsg{owner: scr, number: "42"}); cmd == nil {
 		t.Error("once docker passes, the step should advance")
+	}
+}
+
+// The default registry's host is guessed from the zone field, and connecting
+// an existing cluster can move it to another region. A docker failure there
+// is shown once and then waved through for the same registry; provision checks
+// the final host. Another registry, or any edit, shows it again.
+func TestProjectScreenOnlyWarnsAboutAGuessedRegistry(t *testing.T) {
+	app := testApp(t)
+	scr := newProjectScreen(app.deps)
+	guessed := func(registry string) projValidMsg {
+		return projValidMsg{owner: scr, number: "42", dockerRegistry: registry, dockerGuessed: true, docker: []failedCheck{{
+			"Docker credentials for us-west1-docker.pkg.dev",
+			doctor.Result{Status: doctor.Fail, Detail: "no credentials", Fix: "gcloud auth configure-docker us-west1-docker.pkg.dev"},
+		}}}
+	}
+	const west = "us-west1-docker.pkg.dev/acme/ate-images"
+	if cmd := scr.Update(guessed(west)); cmd != nil {
+		t.Fatal("the first failure on a guessed registry must stop the step")
+	}
+	for _, want := range []string{"gcloud auth configure-docker us-west1-docker.pkg.dev", "comes from the zone above", "Submit again to continue anyway"} {
+		if !strings.Contains(scr.errText, want) {
+			t.Errorf("error lacks %q: %q", want, scr.errText)
+		}
+	}
+	if cmd := scr.Update(guessed(west)); cmd == nil {
+		t.Error("a second submit with the same guessed registry should advance")
+	}
+	if cmd := scr.Update(guessed("europe-west4-docker.pkg.dev/acme/ate-images")); cmd != nil {
+		t.Error("a different guessed registry must be shown again")
+	}
+	scr.Update(key("x"))
+	if scr.dockerAcked != "" {
+		t.Errorf("an edit should re-arm the docker warning, dockerAcked = %q", scr.dockerAcked)
 	}
 }
 
@@ -1019,7 +1057,8 @@ func TestProjectScreenSkipsDockerChecksAfterTheDeadline(t *testing.T) {
 	scr := newProjectScreen(app.deps)
 	scr.fields[0].input.SetValue("acme")
 	scr.fields[scr.repositoryField-1].input.SetValue("us-docker.pkg.dev/acme/ate")
-	if st := scr.inputSetup("acme"); scr.dockerRegistry(&st) == "" {
+	st := scr.inputSetup("acme")
+	if registry, _ := scr.dockerRegistry(&st); registry == "" {
 		t.Fatal("setup: this install should build with docker")
 	}
 	scr.projectNumber = func(ctx context.Context, _ string) (string, error) {
@@ -3412,7 +3451,10 @@ func TestProvisionDockerErrorWrapsToTheScreen(t *testing.T) {
 	}
 }
 
-func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
+// The project step checks the default registry in the zone field's region,
+// but connecting a cluster elsewhere moves it. Provision checks the final
+// region's host before bootstrap starts.
+func TestProvisionChecksTheClusterRegionsRegistry(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
 	app := testApp(t)
 	app.deps.DryRun = false
@@ -3421,8 +3463,8 @@ func TestAutomaticArtifactRegistryWaitsForClusterRegion(t *testing.T) {
 	st := app.deps.Setup
 	st.ProjectID, st.Zone = "acme", "us-west1-c"
 	scr := newProjectScreen(app.deps)
-	if got := scr.dockerRegistry(st); got != "" {
-		t.Fatalf("project checked a region-dependent default: %q", got)
+	if got, guessed := scr.dockerRegistry(st); got != "us-west1-docker.pkg.dev/acme/ate-images" || !guessed {
+		t.Fatalf("project step registry = %q, %v; want the zone field's region, guessed", got, guessed)
 	}
 	st.Zone = "europe-west4-a"
 	bin := t.TempDir()
