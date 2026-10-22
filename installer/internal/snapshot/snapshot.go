@@ -732,10 +732,10 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	}
 	phases = append(phases,
 		"Creating GKE Cluster...",
-		"Creating GCS Bucket for snapshots...",
+		"Creating GCS buckets for snapshots and micro-VM assets...",
 		"Granting GKE Node permissions...",
 		"Granting Atelet permissions...",
-		"Creating IAM policy bindings for bucket...",
+		"Creating IAM policy bindings for the buckets...",
 		"Creating Monitoring Dashboards...",
 	)
 	lines := b.fetchSimLines()

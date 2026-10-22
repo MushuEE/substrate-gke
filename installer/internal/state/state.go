@@ -195,9 +195,10 @@ const (
 // gVisor needs nothing from the wizard: ate-setup applies the cluster-wide
 // gvisor-default SandboxConfig unconditionally as part of the control-plane
 // step. Micro-VM is opt-in upstream and stays opt-in here — its sandbox
-// binaries are fetched at runtime from the snapshot bucket, so they have to be
-// built and staged there, and a SandboxConfig naming them applied, before any
-// micro-VM actor can boot.
+// binaries are fetched at runtime from GCS (the snapshot bucket up to Substrate
+// v0.5.0, BUCKET_NAME-assets after), so they have to be built and staged
+// there, and a SandboxConfig naming them applied, before any micro-VM actor
+// can boot.
 const (
 	SandboxGVisor  = "gvisor"
 	SandboxMicroVM = "microvm"
@@ -467,16 +468,22 @@ func (s *Setup) NewCluster(name string) {
 // snapshots and loses every sibling's history when one cluster is deleted.
 // GCS bucket names must be 3-63 characters, start and end with an alphanumeric
 // character, and contain only lowercase letters, numbers, and dashes/underscores.
-// A derivation past 63 characters is truncated and suffixed with a short hash
-// of the full name, keeping it deterministic and distinct per cluster.
+// setup-gcp also creates NAME-assets for micro-VM assets, so NAME can have at
+// most maxBucketNameLength characters. A longer derivation is truncated and
+// suffixed with a short hash of the full name, keeping it deterministic and
+// distinct per cluster.
 func defaultBucketName(projectID, clusterName, zone string) string {
 	name := strings.ToLower(fmt.Sprintf("ate-snapshots-%s-%s-%s", projectID, clusterName, zone))
-	if len(name) > 63 {
+	if len(name) > maxBucketNameLength {
 		sum := sha256.Sum256([]byte(name))
-		name = strings.TrimRight(name[:63-9], "-_") + "-" + hex.EncodeToString(sum[:])[:8]
+		name = strings.TrimRight(name[:maxBucketNameLength-9], "-_") + "-" + hex.EncodeToString(sum[:])[:8]
 	}
 	return name
 }
+
+// maxBucketNameLength is the longest snapshot bucket name setup-gcp accepts:
+// GCS's 63 characters less the "-assets" suffix of the asset bucket.
+const maxBucketNameLength = 63 - len("-assets")
 
 // ApplyProjectDefaults fills the values derived from the project ID, cluster
 // name, and cluster location unless the user already overrode them. It runs

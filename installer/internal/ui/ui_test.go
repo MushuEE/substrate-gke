@@ -304,8 +304,10 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		t.Fatalf("ClusterName = %q, want legacy-prod", app.deps.Setup.ClusterName)
 	}
 	// The cluster name is part of the derivation: two clusters in one
-	// project and zone must never share a snapshot bucket.
-	wantBucket := "ate-snapshots-my-substrate-project-legacy-prod-us-central1"
+	// project and zone must never share a snapshot bucket. The full
+	// derivation has 58 characters, past setup-gcp's 56, so it is truncated
+	// and suffixed with a hash.
+	wantBucket := "ate-snapshots-my-substrate-project-legacy-prod-41bf0e33"
 	if app.deps.Setup.BucketName != wantBucket {
 		t.Fatalf("BucketName = %q, want %q", app.deps.Setup.BucketName, wantBucket)
 	}

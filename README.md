@@ -6,7 +6,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 > **New here?** Run `make dry-run` first — it walks the entire wizard without touching GCP, so you can see every prompt before committing to anything.
 
 > [!WARNING]
-> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
+> **This creates billable GCP resources.** A completed install provisions a GKE cluster, snapshot and micro-VM asset buckets, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
 
 ![The installer's welcome screen](docs/screenshots/welcome.svg)
 
@@ -68,7 +68,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
+| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot and micro-VM asset buckets, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
 | 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
@@ -120,12 +120,13 @@ Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
 cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
-guest kernel, the guest rootfs and the base kata config — are fetched from the snapshot
-bucket at boot rather than baked into the worker image. Step 9 (`Choose your sandbox
-runtime`) reports whether the cluster you selected has a KVM-capable node pool, and on
-choosing Micro-VM it runs upstream's `hack/install-microvm-deps.sh --install` to assemble
-those five assets, upload them under `kata-assets/` in the snapshot bucket, and apply a
-cluster-wide `SandboxConfig` named `microvm` that points at them.
+guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
+rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
+whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
+runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
+upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
+`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
+points at them.
 
 Actor templates must then name it explicitly:
 
@@ -260,7 +261,7 @@ The installed tree is fetched at the commit the running API server reports it wa
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
+An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>

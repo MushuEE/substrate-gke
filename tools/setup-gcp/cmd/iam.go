@@ -122,13 +122,16 @@ func grantAteletPermissions(ctx context.Context, cfg *Config) error {
 
 	member := fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/atelet", cfg.ProjectNumber, cfg.ProjectID)
 
-	// TODO: This shouldn't be a project-level binding.  We should grant atelet
-	// access only to the specific bucket and artifact registry repository in
-	// use.
-	changed1 := addBinding(&policy.Bindings, "roles/storage.objectAdmin", member)
-	changed2 := addBinding(&policy.Bindings, "roles/artifactregistry.reader", member)
+	// TODO: grant artifactregistry.reader on the repository in use only.
+	changed := addBinding(&policy.Bindings, "roles/artifactregistry.reader", member)
+	// Storage access for revisions that move snapshots with atelet's own
+	// identity; see bucketGrants.
+	// TODO: This shouldn't be a project-level binding.
+	if cfg.AteletSnapshotAccess && addBinding(&policy.Bindings, "roles/storage.objectAdmin", member) {
+		changed = true
+	}
 
-	if !changed1 && !changed2 {
+	if !changed {
 		slog.Info("IAM policy already has required atelet permissions. Skipping update.", slog.String("project", cfg.ProjectID))
 		return nil
 	}
@@ -159,6 +162,9 @@ func validateIamFlags(ctx context.Context, cfg *Config, bucketBindings bool) err
 	}
 	if bucketBindings && cfg.BucketName == "" {
 		return errors.New("--bucket is required for bucket bindings")
+	}
+	if bucketBindings {
+		return checkAssetBucketName(cfg)
 	}
 	return nil
 }
@@ -199,5 +205,6 @@ func init() {
 	iamCmd.Flags().StringVar(&cfg.BucketName, "bucket", getEnv("BUCKET_NAME", ""), "GCS bucket name (required for bucket bindings) [env: BUCKET_NAME]")
 	iamCmd.Flags().Bool("gke-nodes", true, "Grant GKE nodes permission to pull images")
 	iamCmd.Flags().Bool("atelet", true, "Grant atelet project-level permissions")
-	iamCmd.Flags().Bool("bucket-bindings", true, "Grant atelet access to the snapshot bucket")
+	iamCmd.Flags().Bool("bucket-bindings", true, "Grant ate-api-server access to the snapshot bucket, and atelet read access to the asset bucket")
+	addAteletSnapshotAccessFlag(iamCmd)
 }

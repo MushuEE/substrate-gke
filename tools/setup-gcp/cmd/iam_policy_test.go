@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -134,6 +135,7 @@ func TestBucketGrantPreservesConditionalBindings(t *testing.T) {
 	f := newFakeREST(t)
 	cfg := iamConfig()
 	cfg.BucketName = "acme-snapshots"
+	cfg.AteletSnapshotAccess = true
 	atelet := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
 	existing := withCondition("roles/storage.objectAdmin", atelet)
 	f.policies["b/acme-snapshots"] = &iampb.Policy{Etag: []byte("etag-1"), Version: 3, Bindings: []*iampb.Binding{existing}}
@@ -216,6 +218,33 @@ func TestAteletGrantLogsUnderItsOwnName(t *testing.T) {
 				if strings.Contains(out, wrong) {
 					t.Errorf("atelet grant logs %q:\n%s", wrong, out)
 				}
+			}
+		})
+	}
+}
+
+// atelet's project-level storage.objectAdmin is granted only with
+// --atelet-snapshot-access; artifactregistry.reader is granted either way.
+func TestAteletProjectGrantFollowsSnapshotAccess(t *testing.T) {
+	member := "principal://iam.googleapis.com/projects/42/locations/global/workloadIdentityPools/acme.svc.id.goog/subject/ns/ate-system/sa/atelet"
+	for _, access := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot access %v", access), func(t *testing.T) {
+			f := newFakeGCP(t)
+			cfg := iamConfig()
+			cfg.AteletSnapshotAccess = access
+
+			if err := grantAteletPermissions(context.Background(), cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(f.written) != 1 {
+				t.Fatalf("policy written %d times, want 1", len(f.written))
+			}
+			if !hasPlainGrant(f.written[0], "roles/artifactregistry.reader", member) {
+				t.Errorf("atelet lacks artifactregistry.reader; bindings: %v", f.written[0].GetBindings())
+			}
+			if got := hasPlainGrant(f.written[0], "roles/storage.objectAdmin", member); got != access {
+				t.Errorf("atelet has project storage.objectAdmin = %v, want %v", got, access)
 			}
 		})
 	}

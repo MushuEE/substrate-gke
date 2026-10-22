@@ -68,27 +68,29 @@ already_gone() {
   grep -qiE '^ERROR: .*(not found|NOT_FOUND|code=404|HTTPError 404|matched no objects)' "$1"
 }
 
-# bucket_gone reports whether the snapshot bucket no longer exists. The bucket
+# bucket_gone BUCKET reports whether gs://BUCKET no longer exists. The bucket
 # steps check this first rather than relying on each command's error: gcloud
 # words a missing bucket differently by command and transport ("gs://B not
 # found: 404." or "HTTPError 404: The specified bucket does not exist."). Only
 # a 404 counts. Any other describe failure is shown and the bucket steps run
-# anyway, so they report their own errors. The answer is cached for the run.
-bucket_state=""
+# anyway, so they report their own errors. The answer is cached per bucket for
+# the run, in a scratch file.
 bucket_gone() {
-  if [ -z "${bucket_state}" ]; then
-    if gcloud storage buckets describe "gs://${BUCKET_NAME}" \
+  local bucket="$1"
+  local state_file="${scratch}/bucket-state-${bucket}"
+  if [ ! -f "${state_file}" ]; then
+    if gcloud storage buckets describe "gs://${bucket}" \
         --project="${PROJECT_ID}" --format="value(name)" \
         >/dev/null 2>"${scratch}/describe-err"; then
-      bucket_state="present"
+      echo "present" >"${state_file}"
     elif grep -qE '^ERROR: .*(not found: 404|HTTPError 404)' "${scratch}/describe-err"; then
-      bucket_state="gone"
+      echo "gone" >"${state_file}"
     else
       cat "${scratch}/describe-err" >&2
-      bucket_state="unknown"
+      echo "unknown" >"${state_file}"
     fi
   fi
-  [ "${bucket_state}" = "gone" ]
+  [ "$(cat "${state_file}")" = "gone" ]
 }
 
 # gcloud_step STEP ARGS... runs `gcloud ARGS...` with its output shown as it
@@ -117,7 +119,7 @@ function usage() {
   echo "  --revoke-gke-node-permissions         Revoke GKE nodes permission to pull images"
   echo "  --revoke-atelet-permissions           Revoke atelet's project-level IAM bindings"
   echo "  --delete-iam-policy-bindings          Delete bucket IAM policy bindings for atelet and ate-api-server"
-  echo "  --delete-snapshot-bucket              Delete snapshot bucket"
+  echo "  --delete-snapshot-bucket              Delete the snapshot bucket and the micro-VM asset bucket"
   echo "  --delete-gvisor-node-pool             Delete gVisor node pool"
   echo "  --delete-cluster                      Delete GKE cluster"
   echo "  --delete-dashboards                   Delete the Substrate monitoring dashboards"
@@ -189,39 +191,58 @@ delete_dashboards() {
   done
 }
 
-# Delete IAM Policy Bindings for Bucket (Reverse of create_iam_policy_bindings)
+# Delete IAM Policy Bindings for the buckets (Reverse of create_iam_policy_bindings)
 delete_iam_policy_bindings() {
   require PROJECT_ID PROJECT_NUMBER BUCKET_NAME
-  echo "Deleting IAM policy bindings for bucket..."
-  if bucket_gone; then
-    echo "(gs://${BUCKET_NAME} already deleted; its bindings went with it)"
-    return 0
-  fi
+  echo "Deleting IAM policy bindings for the buckets..."
   local wi="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/ate-system/sa"
+  local asset_bucket="${BUCKET_NAME}-assets"
   local subject role
-  for subject in atelet ate-api-server; do
-    for role in roles/storage.objectAdmin roles/storage.bucketViewer; do
-      gcloud_step "delete bucket IAM binding (${subject}, ${role})" \
-        storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
-        --member="${wi}/${subject}" \
-        --role="${role}" \
-        --quiet
+  if bucket_gone "${BUCKET_NAME}"; then
+    echo "(gs://${BUCKET_NAME} already deleted; its bindings went with it)"
+  else
+    # atelet's snapshot bucket roles exist only on installs made with
+    # --atelet-snapshot-access; a missing binding counts as already deleted.
+    for subject in atelet ate-api-server; do
+      for role in roles/storage.objectAdmin roles/storage.bucketViewer; do
+        gcloud_step "delete bucket IAM binding (${subject}, ${role})" \
+          storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
+          --member="${wi}/${subject}" \
+          --role="${role}" \
+          --quiet
+      done
     done
-  done
+  fi
+  if bucket_gone "${asset_bucket}"; then
+    echo "(gs://${asset_bucket} already deleted; its bindings went with it)"
+  else
+    gcloud_step "delete asset bucket IAM binding (atelet, roles/storage.objectViewer)" \
+      storage buckets remove-iam-policy-binding "gs://${asset_bucket}" \
+      --member="${wi}/atelet" \
+      --role=roles/storage.objectViewer \
+      --quiet
+  fi
 }
 
-# Delete Snapshot Bucket (Reverse of create_snapshot_bucket)
+# Delete the snapshot and micro-VM asset buckets (Reverse of create_buckets)
 delete_snapshot_bucket() {
   require PROJECT_ID BUCKET_NAME
-  echo "Deleting snapshot bucket..."
-  if bucket_gone; then
-    echo "(gs://${BUCKET_NAME} already deleted)"
-    return 0
-  fi
-  gcloud_step "empty snapshot bucket" \
-    storage rm --recursive "gs://${BUCKET_NAME}/**" --project="${PROJECT_ID}" --quiet
-  gcloud_step "delete snapshot bucket" \
-    storage buckets delete "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --quiet
+  echo "Deleting snapshot and asset buckets..."
+  local bucket kind
+  for kind in snapshot asset; do
+    bucket="${BUCKET_NAME}"
+    if [ "${kind}" = "asset" ]; then
+      bucket="${BUCKET_NAME}-assets"
+    fi
+    if bucket_gone "${bucket}"; then
+      echo "(gs://${bucket} already deleted)"
+      continue
+    fi
+    gcloud_step "empty ${kind} bucket" \
+      storage rm --recursive "gs://${bucket}/**" --project="${PROJECT_ID}" --quiet
+    gcloud_step "delete ${kind} bucket" \
+      storage buckets delete "gs://${bucket}" --project="${PROJECT_ID}" --quiet
+  done
 }
 
 # Delete gVisor Node Pool (Reverse of create_gvisor_node_pool)

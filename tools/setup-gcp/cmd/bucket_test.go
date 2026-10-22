@@ -16,8 +16,11 @@ package cmd
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 
+	"cloud.google.com/go/iam"
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 )
 
@@ -32,6 +35,9 @@ func TestValidateBucketFlags(t *testing.T) {
 		}, nil
 	}
 
+	tooLong := strings.Repeat("b", 57)
+	tooLongErr := `bucket name "` + tooLong + `" is too long: the asset bucket "` + tooLong + `-assets" would have 64 characters, and GCS allows 63`
+
 	tests := []struct {
 		name string
 		cfg  Config
@@ -41,6 +47,15 @@ func TestValidateBucketFlags(t *testing.T) {
 			name: "missing bucket name",
 			cfg:  Config{ProjectID: "test-project"},
 			want: "--name is required",
+		},
+		{
+			name: "bucket name too long for the asset bucket",
+			cfg:  Config{ProjectID: "test-project", BucketName: tooLong},
+			want: tooLongErr,
+		},
+		{
+			name: "longest bucket name the asset bucket allows",
+			cfg:  Config{ProjectID: "test-project", BucketName: strings.Repeat("b", 56)},
 		},
 		{
 			name: "missing project id",
@@ -82,5 +97,71 @@ func TestValidateBucketFlags(t *testing.T) {
 				t.Errorf("validateBucketFlags() = %q; want %q", err.Error(), tt.want)
 			}
 		})
+	}
+}
+
+// ateletGrants returns the bucket grants for atelet.
+func ateletGrants(cfg *Config) []bucketGrant {
+	var got []bucketGrant
+	for _, g := range bucketGrants(cfg) {
+		if g.subject == "atelet" {
+			got = append(got, g)
+		}
+	}
+	return got
+}
+
+// TestAteletStorageAccess pins atelet's storage access to read on the asset
+// bucket.
+func TestAteletStorageAccess(t *testing.T) {
+	cfg := &Config{BucketName: "snaps"}
+	want := []bucketGrant{{bucket: "snaps-assets", subject: "atelet", role: "roles/storage.objectViewer"}}
+	if got := ateletGrants(cfg); !slices.Equal(got, want) {
+		t.Errorf("atelet bucket grants = %v, want %v", got, want)
+	}
+}
+
+// With --atelet-snapshot-access, atelet keeps the snapshot bucket roles that
+// Substrate releases up to v0.5.0 need, on top of read on the asset bucket.
+func TestAteletSnapshotAccessKeepsSnapshotBucketRoles(t *testing.T) {
+	cfg := &Config{BucketName: "snaps", AteletSnapshotAccess: true}
+	want := []bucketGrant{
+		{bucket: "snaps-assets", subject: "atelet", role: "roles/storage.objectViewer"},
+		{bucket: "snaps", subject: "atelet", role: "roles/storage.objectAdmin"},
+		{bucket: "snaps", subject: "atelet", role: "roles/storage.bucketViewer"},
+	}
+	if got := ateletGrants(cfg); !slices.Equal(got, want) {
+		t.Errorf("atelet bucket grants = %v, want %v", got, want)
+	}
+}
+
+// policyMembers returns the members of the unconditional bindings of role.
+func policyMembers(policy *iam.Policy3, role string) []string {
+	var members []string
+	for _, b := range policy.Bindings {
+		if b.GetCondition() == nil && b.GetRole() == role {
+			members = append(members, b.GetMembers()...)
+		}
+	}
+	return members
+}
+
+func TestAddGrantsOnlyTouchesTheNamedBucket(t *testing.T) {
+	cfg := &Config{ProjectID: "proj", ProjectNumber: "123", BucketName: "snaps"}
+	member := func(sa string) string {
+		return "principal://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/proj.svc.id.goog/subject/ns/ate-system/sa/" + sa
+	}
+	policy := &iam.Policy3{}
+	if !addGrants(policy, cfg, "snaps-assets", bucketGrants(cfg)) {
+		t.Fatal("addGrants on the asset bucket added nothing")
+	}
+	if got := policyMembers(policy, "roles/storage.objectViewer"); !slices.Equal(got, []string{member("atelet")}) {
+		t.Errorf("objectViewer members = %v, want only atelet", got)
+	}
+	if got := policyMembers(policy, "roles/storage.objectAdmin"); len(got) != 0 {
+		t.Errorf("objectAdmin members on the asset bucket = %v, want none", got)
+	}
+	if addGrants(policy, cfg, "snaps-assets", bucketGrants(cfg)) {
+		t.Error("a second addGrants added bindings the policy already has")
 	}
 }

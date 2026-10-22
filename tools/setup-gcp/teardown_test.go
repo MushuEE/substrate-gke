@@ -157,8 +157,9 @@ func TestTeardownSkipsBucketStepsWhenBucketIsGone(t *testing.T) {
 		if run.exitCode != 0 {
 			t.Errorf("with describe error %q, teardown exited %d, want 0:\n%s", stderr, run.exitCode, run.output)
 		}
-		if n := strings.Count(run.calls, "storage buckets describe"); n != 1 {
-			t.Errorf("with describe error %q, teardown described the bucket %d times, want 1; calls:\n%s", stderr, n, run.calls)
+		// Once each for the snapshot and asset buckets.
+		if n := strings.Count(run.calls, "storage buckets describe"); n != 2 {
+			t.Errorf("with describe error %q, teardown described the buckets %d times, want 2; calls:\n%s", stderr, n, run.calls)
 		}
 		for _, skipped := range []string{"storage rm", "storage buckets delete", "remove-iam-policy-binding"} {
 			if strings.Contains(run.calls, skipped) {
@@ -181,6 +182,14 @@ func TestTeardownToleratesAnEmptyBucketWithoutBindings(t *testing.T) {
 	}
 	if !strings.Contains(run.calls, "storage buckets delete gs://acme-snapshots") {
 		t.Errorf("teardown did not delete the bucket; calls:\n%s", run.calls)
+	}
+	for _, want := range []string{
+		"storage buckets delete gs://acme-snapshots-assets",
+		"storage buckets remove-iam-policy-binding gs://acme-snapshots-assets",
+	} {
+		if !strings.Contains(run.calls, want) {
+			t.Errorf("teardown did not run %q for the asset bucket; calls:\n%s", want, run.calls)
+		}
 	}
 }
 

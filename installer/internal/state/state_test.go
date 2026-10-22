@@ -187,7 +187,8 @@ func TestDefaultBucketName(t *testing.T) {
 // Two clusters in one project and zone must never derive the same bucket:
 // snapshot keys carry no cluster identifier and teardown deletes the whole
 // bucket, so a shared bucket loses every sibling cluster's snapshots. That
-// has to survive truncation — GCS caps bucket names at 63 characters, and
+// has to survive truncation — setup-gcp caps snapshot bucket names at 56
+// characters (GCS's 63 less the asset bucket's "-assets" suffix), and
 // project+cluster+zone routinely exceeds it.
 func TestDefaultBucketNameIsPerClusterEvenWhenTruncated(t *testing.T) {
 	const project, zone = "a-very-long-gcp-project-name-1234567890", "us-central1-a"
@@ -195,8 +196,8 @@ func TestDefaultBucketNameIsPerClusterEvenWhenTruncated(t *testing.T) {
 	b := defaultBucketName(project, "staging-cluster-with-a-long-nap", zone)
 
 	for _, name := range []string{a, b} {
-		if len(name) > 63 {
-			t.Errorf("bucket name %q exceeds 63 characters", name)
+		if len(name) > 56 {
+			t.Errorf("bucket name %q exceeds 56 characters", name)
 		}
 		if name != strings.ToLower(name) || strings.HasSuffix(name, "-") {
 			t.Errorf("bucket name %q is not a valid GCS name", name)

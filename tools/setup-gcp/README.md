@@ -18,7 +18,7 @@ It uses a hierarchical command structure:
     *   `enable apis` - Enable required GCP APIs.
     *   `create` - Parent command for resource creation.
         *   `cluster` - Create GKE cluster.
-        *   `bucket` - Create GCS bucket.
+        *   `bucket` - Create the GCS snapshot and asset buckets.
         *   `iam` - Create IAM policy bindings and grant permissions.
         *   `dashboards` - Create Cloud Monitoring dashboards.
         *   `cloudsql` - Create a Cloud SQL PostgreSQL instance for the ateapi store, with IAM database authentication (see [cloud-sql.md](cloud-sql.md)).
@@ -262,7 +262,9 @@ one of the options below.
 
 ### 3. Create Bucket
 
-Creates a GCS bucket for storing snapshots.
+Creates the GCS bucket for snapshots and the asset bucket, `NAME-assets`, for
+micro-VM sandbox assets. `NAME` can have at most 56 characters, so the asset
+bucket's name fits GCS's limit of 63.
 
 ```bash
 go -C tools/setup-gcp run . create bucket [flags]
@@ -271,7 +273,7 @@ go -C tools/setup-gcp run . create bucket [flags]
 **Flags:**
 | Flag | Description | Default Env Var | Fallback Default |
 | :--- | :--- | :--- | :--- |
-| `--name` | Name of the GCS bucket. | `BUCKET_NAME` | None (Required*) |
+| `--name` | Name of the GCS snapshot bucket. The micro-VM asset bucket is created beside it as `NAME-assets`. | `BUCKET_NAME` | None (Required*) |
 
 *\*Note: Required unless the `BUCKET_NAME` environment variable is set.*
 
@@ -289,18 +291,20 @@ go -C tools/setup-gcp run . create iam [flags]
 | `--bucket` | GCS bucket name. | `BUCKET_NAME` | None (Required for bucket bindings*) |
 | `--gke-nodes` | Grant GKE nodes permission to pull images. | - | `true` |
 | `--atelet` | Grant atelet project-level permissions. | - | `true` |
-| `--bucket-bindings` | Grant atelet and ate-api-server access to the snapshot bucket. | - | `true` |
+| `--bucket-bindings` | Grant ate-api-server access to the snapshot bucket, and atelet read access to the asset bucket. | - | `true` |
+| `--atelet-snapshot-access` | Also grant atelet `storage.objectAdmin` on the project, and `storage.objectAdmin` and `storage.bucketViewer` on the snapshot bucket. Substrate releases up to v0.5.0 need these; see below. | `ATELET_SNAPSHOT_ACCESS` | `true` |
 
 *\*Note: Required for bucket bindings unless the `BUCKET_NAME` environment variable is set.*
 
 #### What `create iam` actually grants
 
 On a fresh GCP project these bindings do not exist, and nothing else creates
-them — without them atelet cannot read or write external snapshots (`403` from
-GCS on the first suspend/resume), ate-api cannot copy or collect them, and
-nodes cannot pull images. `bootstrap` and `create iam` apply them for you; the
-table below is the reference for auditing them, or for applying them by hand in
-projects where you cannot run the tool with project-level IAM permissions.
+them. Without them atelet cannot fetch micro-VM assets, snapshots cannot be
+moved (`403` from GCS on the first suspend/resume), ate-api cannot copy or
+collect them, and nodes cannot pull images. `bootstrap` and `create iam` apply
+them for you. The table below is the reference for auditing them, or for
+applying them by hand in projects where you cannot run the tool with
+project-level IAM permissions.
 
 atelet and ate-api authenticate via [GKE Workload Identity
 Federation](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity):
@@ -313,18 +317,20 @@ cluster must have it enabled too, or their GCS calls fail with `401`).
 
 | Member | Role | Resource | Why |
 | :--- | :--- | :--- | :--- |
-| atelet WI principal¹ | `roles/storage.objectAdmin` | project² | Read/write actor snapshots in GCS |
 | atelet WI principal¹ | `roles/artifactregistry.reader` | project² | Pull sandbox runtime assets |
-| atelet WI principal¹ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
-| atelet WI principal¹ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
 | ate-api-server WI principal¹ | `roles/storage.objectAdmin` | snapshot bucket | Copy external snapshots for tags, delete the ones nothing refers to |
 | ate-api-server WI principal¹ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
+| atelet WI principal¹ | `roles/storage.objectViewer` | asset bucket (`BUCKET_NAME-assets`) | Read micro-VM sandbox assets |
+| atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | project² | Read/write actor snapshots in GCS |
+| atelet WI principal¹ ⁴ | `roles/storage.objectAdmin` | snapshot bucket | Read/write snapshot objects |
+| atelet WI principal¹ ⁴ | `roles/storage.bucketViewer` | snapshot bucket | List/stat the snapshot bucket |
 | default compute SA³ | `roles/artifactregistry.reader` | project² | Nodes pull images from Artifact Registry, which also serves gcr.io |
 
 ¹ `principal://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/PROJECT_ID.svc.id.goog/subject/ns/ate-system/sa/SERVICE_ACCOUNT` — note it is keyed to the **project number**, not the ID.
 ² Project-level today; scoping these down is tracked in the TODOs in `cmd/iam.go`.
 ³ `PROJECT_NUMBER-compute@developer.gserviceaccount.com`. It gets no storage role, since root on a node can use it. Installs set up before this also granted it `roles/storage.objectViewer` on the project. Remove that with
 `gcloud projects remove-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" --role=roles/storage.objectViewer --condition=None`.
+⁴ Only with `--atelet-snapshot-access` (on by default). Substrate releases up to v0.5.0 move snapshots with atelet's own identity and need these. Later revisions run every snapshot transfer on a token scoped to its actor, issued by ate-api-server's credential exchange, and do not; pass `--atelet-snapshot-access=false` for them.
 
 Manual equivalent:
 
@@ -334,15 +340,51 @@ ATELET="${WI}/atelet"
 ATE_API="${WI}/ate-api-server"
 
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="${ATELET}" --role=roles/storage.objectAdmin
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="${ATELET}" --role=roles/artifactregistry.reader
-for MEMBER in "${ATELET}" "${ATE_API}"; do
-  gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
-    --member="${MEMBER}" --role=roles/storage.objectAdmin
-  gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
-    --member="${MEMBER}" --role=roles/storage.bucketViewer
-done
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATE_API}" --role=roles/storage.objectAdmin
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATE_API}" --role=roles/storage.bucketViewer
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}-assets" \
+  --member="${ATELET}" --role=roles/storage.objectViewer
+```
+
+For Substrate releases up to v0.5.0 (`--atelet-snapshot-access`), also:
+
+```bash
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="${ATELET}" --role=roles/storage.objectAdmin
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATELET}" --role=roles/storage.objectAdmin
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATELET}" --role=roles/storage.bucketViewer
+```
+
+#### Moving to per-actor snapshot credentials
+
+Substrate does not support upgrading a cluster in place yet. A cluster with
+micro-VM workers has to be recreated: each node indexes a sandbox runtime by
+the digests of its assets, which do not change when the assets move to the
+asset bucket, so a node keeps fetching them from the snapshot bucket. The
+commands below still apply when the new cluster reuses the GCP project.
+
+setup-gcp only adds bindings, so turning `--atelet-snapshot-access` off does
+not remove atelet's snapshot grants from an existing install. Run Substrate at
+a revision whose node plugin gets snapshot credentials from ate-api-server's
+credential exchange first. On an older release, removing these grants makes
+every suspend and resume fail with `403`. Remove those grants after running
+`create bucket` and `create iam`, and after rerunning
+`hack/install-microvm-deps.sh --install` if you use micro-VM workers, so the
+assets are in the asset bucket. `ATELET` is set as in the manual equivalent
+above:
+
+```bash
+gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
+  --member="${ATELET}" --role=roles/storage.objectAdmin --condition=None
+gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATELET}" --role=roles/storage.objectAdmin
+gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="${ATELET}" --role=roles/storage.bucketViewer
 ```
 
 ### 5. Create Dashboards
@@ -381,7 +423,8 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | `--boot-disk-type` | Boot disk type for the node pool (empty = GKE default, or `hyperdisk-balanced` when provisioned IOPS/throughput are set). | `BOOT_DISK_TYPE` | None |
 | `--boot-disk-provisioned-iops` | Provisioned IOPS for the node pool boot disk (`hyperdisk-balanced` only; must be set together with `--boot-disk-provisioned-throughput`). | `BOOT_DISK_PROVISIONED_IOPS` | None |
 | `--boot-disk-provisioned-throughput` | Provisioned throughput in MiB/s for the node pool boot disk (`hyperdisk-balanced` only; must be set together with `--boot-disk-provisioned-iops`). | `BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS` | None |
-| `--bucket-name` | Name of the GCS bucket for snapshots. | `BUCKET_NAME` | None (Required*) |
+| `--bucket-name` | Name of the GCS bucket for snapshots, at most 56 characters. The micro-VM asset bucket is created beside it as `BUCKET_NAME-assets`. | `BUCKET_NAME` | None (Required*) |
+| `--atelet-snapshot-access` | Grant atelet the snapshot storage roles Substrate releases up to v0.5.0 need (see [What `create iam` actually grants](#what-create-iam-actually-grants)). | `ATELET_SNAPSHOT_ACCESS` | `true` |
 | `--create-repository` | Create a Docker image repository for source builds. | `CREATE_ARTIFACT_REPOSITORY` | `false` |
 | `--repository-name` | Artifact Registry repository name. | `ARTIFACT_REGISTRY_REPOSITORY` | `ate-images` |
 | `--dashboard-dir` | Directory containing dashboard JSON files. Empty uses the copies of `tools/setup-gcp/dashboards` built into the binary. | `DASHBOARD_DIR` | (empty) |
@@ -403,7 +446,7 @@ go -C tools/setup-gcp run . create repository --project-id <project> --region <r
 
 [`teardown.sh`](teardown.sh) deletes what `bootstrap` creates, in reverse
 order: dashboards, bucket IAM bindings, project IAM bindings, the snapshot
-bucket and its contents, and the cluster. It reads the same environment
+and asset buckets and their contents, and the cluster. It reads the same environment
 variables (`PROJECT_ID`, `PROJECT_NUMBER`, `CLUSTER_NAME`, `CLUSTER_LOCATION`,
 `BUCKET_NAME`) and shells out to `gcloud`. Each step can run alone; see
 `tools/setup-gcp/teardown.sh` with no arguments for the list. It sources
@@ -419,7 +462,7 @@ since GKE answers a wrong location with the same NOT_FOUND as a deleted
 cluster. Checking other locations needs `container.clusters.list`; without
 it, teardown prints a warning and treats the cluster as deleted, so check
 `CLUSTER_LOCATION` if you see that warning. The bucket steps first check
-whether the bucket exists and skip themselves if it does not.
+whether each bucket exists and skip it if it does not.
 
 Image repositories are kept by default, including with `--all`. Add
 `--delete-repository` to delete one, setting `GCE_REGION` and optionally

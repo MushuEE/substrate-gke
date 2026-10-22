@@ -25,7 +25,7 @@ import (
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "Fully bootstrap the GCP environment",
-	Long:  `Enables APIs, creates the cluster and bucket, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
+	Long:  `Enables APIs, creates the cluster and the snapshot and asset buckets, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		warnDeprecatedMachineTypeEnv(cmd)
@@ -39,6 +39,9 @@ var bootstrapCmd = &cobra.Command{
 		}
 		if cfg.BucketName == "" {
 			return errors.New("--bucket-name is required")
+		}
+		if err := checkAssetBucketName(&cfg); err != nil {
+			return err
 		}
 
 		slog.Info("Starting full bootstrap...")
@@ -69,8 +72,8 @@ var bootstrapCmd = &cobra.Command{
 			return err
 		}
 
-		logStep("Creating GCS Bucket for snapshots...")
-		if err := createSnapshotBucket(ctx, &cfg); err != nil {
+		logStep("Creating GCS buckets for snapshots and micro-VM assets...")
+		if err := createBuckets(ctx, &cfg); err != nil {
 			return err
 		}
 
@@ -84,7 +87,7 @@ var bootstrapCmd = &cobra.Command{
 			return err
 		}
 
-		logStep("Creating IAM policy bindings for bucket...")
+		logStep("Creating IAM policy bindings for the buckets...")
 		if err := createIamPolicyBindings(ctx, &cfg); err != nil {
 			return err
 		}
@@ -114,7 +117,8 @@ func init() {
 	bootstrapCmd.Flags().StringVar(&cfg.BootDiskType, "boot-disk-type", getEnv("BOOT_DISK_TYPE", ""), "Boot disk type for the node pool; empty = GKE default, or hyperdisk-balanced when provisioned IOPS/throughput are set [env: BOOT_DISK_TYPE]")
 	bootstrapCmd.Flags().Int64Var(&cfg.BootDiskProvisionedIOPS, "boot-disk-provisioned-iops", getEnv("BOOT_DISK_PROVISIONED_IOPS", int64(0)), "Provisioned IOPS for the node pool boot disk (hyperdisk-balanced only; set together with --boot-disk-provisioned-throughput; 0 = GKE default) [env: BOOT_DISK_PROVISIONED_IOPS]")
 	bootstrapCmd.Flags().Int64Var(&cfg.BootDiskProvisionedThroughputMBps, "boot-disk-provisioned-throughput", getEnv("BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS", int64(0)), "Provisioned throughput in MiB/s for the node pool boot disk (hyperdisk-balanced only; set together with --boot-disk-provisioned-iops; 0 = GKE default) [env: BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS]")
-	bootstrapCmd.Flags().StringVar(&cfg.BucketName, "bucket-name", getEnv("BUCKET_NAME", ""), "Name of the GCS bucket for snapshots [env: BUCKET_NAME]")
+	bootstrapCmd.Flags().StringVar(&cfg.BucketName, "bucket-name", getEnv("BUCKET_NAME", ""), "Name of the GCS bucket for snapshots. The micro-VM asset bucket is named BUCKET_NAME-assets [env: BUCKET_NAME]")
+	addAteletSnapshotAccessFlag(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&cfg.CreateArtifactRepository, "create-repository", getEnv("CREATE_ARTIFACT_REPOSITORY", false), "Create an Artifact Registry repository for source builds [env: CREATE_ARTIFACT_REPOSITORY]")
 	bootstrapCmd.Flags().StringVar(&cfg.ArtifactRegistryRepository, "repository-name", getEnv("ARTIFACT_REGISTRY_REPOSITORY", "ate-images"), "Name of the Artifact Registry Docker repository [env: ARTIFACT_REGISTRY_REPOSITORY]")
 	bootstrapCmd.Flags().StringVar(&cfg.DashboardDir, "dashboard-dir", getEnv("DASHBOARD_DIR", ""), "Directory containing dashboard JSON files; empty = the definitions built into this binary [env: DASHBOARD_DIR]")

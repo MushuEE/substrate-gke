@@ -39,9 +39,9 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 			if ar {
 				phases = append(phases, "Creating Artifact Registry repository")
 			}
-			phases = append(phases, "Creating GKE Cluster", "Creating GCS Bucket for snapshots",
+			phases = append(phases, "Creating GKE Cluster", "Creating GCS buckets for snapshots and micro-VM assets",
 				"Granting GKE Node permissions", "Granting Atelet permissions",
-				"Creating IAM policy bindings for bucket", "Creating Monitoring Dashboards")
+				"Creating IAM policy bindings for the buckets", "Creating Monitoring Dashboards")
 			if len(items) != len(phases)+1 {
 				t.Fatalf("%d checklist items for %d phases", len(items), len(phases))
 			}

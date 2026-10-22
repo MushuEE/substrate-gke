@@ -69,10 +69,10 @@ func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistI
 	}
 	return append(items,
 		ChecklistItem{clusterStep, contains("Creating GKE Cluster")},
-		ChecklistItem{"Create the GCS snapshot bucket", contains("Creating GCS Bucket for snapshots")},
+		ChecklistItem{"Create the GCS snapshot and asset buckets", contains("Creating GCS buckets for snapshots")},
 		ChecklistItem{"Grant GKE node permissions", contains("Granting GKE Node permissions")},
 		ChecklistItem{"Grant atelet Workload Identity permissions", contains("Granting Atelet permissions")},
-		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for bucket")},
+		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for the buckets")},
 		ChecklistItem{"Create Cloud Monitoring dashboards", contains("Creating Monitoring Dashboards")},
 	)
 }
@@ -117,7 +117,7 @@ func MicroVMDeps() []ChecklistItem {
 	return []ChecklistItem{
 		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Assemble the micro-VM asset set", containsAny("Assembling micro-VM assets", "Assets already present", "re-assembling")},
-		{"Upload assets to the snapshot bucket (kata-assets/)", contains("Uploading assets to gs://")},
+		{"Upload assets to GCS (kata-assets/)", contains("Uploading assets to gs://")},
 		{"Apply the cluster-wide microvm SandboxConfig", contains("Applying microvm SandboxConfig")},
 	}
 }
