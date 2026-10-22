@@ -251,7 +251,10 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 		{"empty entries", `{"credHelpers":{"host":""},"auths":{"host":{}}}`, Warn},
 		{"helper", `{"credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
 		{"store", `{"credsStore":"desktop"}`, Warn},
-		{"login", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
+		{"store with an Artifact Registry helper", `{"credsStore":"desktop","credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
+		{"login", `{"auths":{"europe-west4-docker.pkg.dev":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
+		{"gcr.io helpers only", `{"credHelpers":{"gcr.io":"gcloud","us.gcr.io":"gcloud"}}`, Warn},
+		{"login elsewhere only", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Warn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -274,6 +277,9 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 				}
 				if tc.name == "store" && !strings.Contains(res.Detail, "before a registry is chosen") {
 					t.Errorf("credential store: %s", res.Detail)
+				}
+				if tc.name == "gcr.io helpers only" && !strings.Contains(res.Detail, "only for gcr.io, us.gcr.io") {
+					t.Errorf("gcr.io helpers: the warning should name the hosts it found: %s", res.Detail)
 				}
 				if res.Status == Warn && (res.Fix == "" || !strings.Contains(res.Detail, "only needed to build")) {
 					t.Errorf("warning needs a fix and source-build qualifier: %+v", res)

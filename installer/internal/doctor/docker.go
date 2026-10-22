@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -187,7 +188,16 @@ func loadDockerConfig(path string) (dockerConfig, error) {
 	return cfg, nil
 }
 
-// dockerAuthConfigured checks for credential configuration before a registry is chosen.
+// artifactRegistrySuffix ends every Artifact Registry Docker host
+// (<region>-docker.pkg.dev), where a source build's default repository lives.
+const artifactRegistrySuffix = "-docker.pkg.dev"
+
+// dockerAuthConfigured checks for credential configuration before a registry
+// is chosen. The region, and so the exact host, is not known yet, so it looks
+// for credentials on any Artifact Registry host: a source build pushes to
+// <region>-docker.pkg.dev unless the user names another registry. Credentials
+// only for other hosts (gcr.io helpers, a docker login elsewhere) are reported
+// by name, since they do not cover that default.
 func dockerAuthConfigured(_ context.Context) Result {
 	if res, ok := notChecked(); ok {
 		return res
@@ -197,20 +207,31 @@ func dockerAuthConfigured(_ context.Context) Result {
 	if err != nil {
 		return Result{Fail, err.Error(), fix}
 	}
-	configured := false
-	for _, helper := range cfg.CredHelpers {
-		configured = configured || helper != ""
-	}
-	for _, entry := range cfg.Auths {
-		configured = configured || hasToken(entry)
-	}
-	if !configured {
-		if cfg.CredsStore != "" {
-			return Result{Warn, "credential store configured; cannot verify credentials before a registry is chosen", fix}
+	var hosts []string
+	for host, helper := range cfg.CredHelpers {
+		if helper != "" {
+			hosts = append(hosts, registryHost(host))
 		}
-		return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
 	}
-	return Result{Pass, "credential configuration found; registry credentials are checked after selection", ""}
+	for key, entry := range cfg.Auths {
+		if hasToken(entry) {
+			hosts = append(hosts, registryHost(key))
+		}
+	}
+	slices.Sort(hosts)
+	hosts = slices.Compact(hosts)
+	for _, host := range hosts {
+		if strings.HasSuffix(host, artifactRegistrySuffix) {
+			return Result{Pass, "credential configuration found for " + host + "; registry credentials are checked after selection", ""}
+		}
+	}
+	if cfg.CredsStore != "" {
+		return Result{Warn, "credential store configured; cannot verify credentials before a registry is chosen", fix}
+	}
+	if len(hosts) > 0 {
+		return Result{Warn, fmt.Sprintf("Docker credentials are configured only for %s, not for an Artifact Registry host (<region>-docker.pkg.dev), where a source build's default image repository lives", strings.Join(hosts, ", ")), fix}
+	}
+	return Result{Fail, "no Docker credential helper or saved credentials configured", fix}
 }
 
 // dockerAuth reports whether docker can authenticate to host. ko finds
