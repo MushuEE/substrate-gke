@@ -110,7 +110,7 @@ func (s *upgradeSourceScreen) enterManual() tea.Cmd {
 	s.fields = []textinput.Model{
 		newInput(st.InstalledCommit, "40 hex characters"),
 		newInput(st.InstalledVersion, "kubectl get nodes -L ate.dev/substrate-version"),
-		newInput(st.InstalledImageRepo, snapshot.ReleaseRepo),
+		newInput(st.InstalledImageRepo, "registry.example.com/substrate"),
 		newInput(st.KoDockerRepo, "<region>-docker.pkg.dev/<project>/ate-images"),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)

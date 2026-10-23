@@ -48,12 +48,12 @@ func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
 
 	pre, err := ParseProbe([]string{
 		versionsMarker + "v0.1.0 v0.1.1 ",
-		imageMarker + ReleaseRepo + "/ateapi:v0.1.1@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
+		imageMarker + testImageRepo + "/ateapi:v0.1.1@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
 	})
 	if err != nil {
 		t.Fatalf("ParseProbe(prebuilt): %v", err)
 	}
-	if !pre.Prebuilt() || pre.ImageRepo != ReleaseRepo || pre.ImageTag != "v0.1.1" || len(pre.Running) != 2 {
+	if !pre.Prebuilt() || pre.ImageRepo != testImageRepo || pre.ImageTag != "v0.1.1" || len(pre.Running) != 2 {
 		t.Errorf("prebuilt probe = %+v", pre)
 	}
 	if exports := pre.Exports(st, "v0.1.1"); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.1'") || strings.Contains(exports, "export KO_DOCKER_REPO") {
@@ -194,28 +194,28 @@ func TestCheckInstalledFailsWhenKubectlFails(t *testing.T) {
 // which a digest-only reference does not name at all.
 func TestApplyPairsTheImageTagWithTheChosenVersion(t *testing.T) {
 	const digest = "@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
-	pre, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", imageMarker + ReleaseRepo + "/ateapi:v0.1.1" + digest})
+	pre, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", imageMarker + testImageRepo + "/ateapi:v0.1.1" + digest})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, version := range []string{"v0.1.0", "v0.1.1"} {
 		st := state.NewSetup()
 		pre.Apply(st, version)
-		if st.InstalledImageRepo != ReleaseRepo || st.InstalledImageTag != version {
+		if st.InstalledImageRepo != testImageRepo || st.InstalledImageTag != version {
 			t.Errorf("Apply(%s) recorded %s:%s", version, st.InstalledImageRepo, st.InstalledImageTag)
 		}
 	}
 
-	pinned, err := ParseProbe([]string{versionsMarker + "v0.1.0", imageMarker + ReleaseRepo + "/ateapi" + digest})
+	pinned, err := ParseProbe([]string{versionsMarker + "v0.1.0", imageMarker + testImageRepo + "/ateapi" + digest})
 	if err != nil {
 		t.Fatalf("a digest-only reference should parse: %v", err)
 	}
-	if !pinned.Prebuilt() || pinned.ImageRepo != ReleaseRepo || pinned.ImageTag != "" {
+	if !pinned.Prebuilt() || pinned.ImageRepo != testImageRepo || pinned.ImageTag != "" {
 		t.Errorf("digest-only probe = %+v", pinned)
 	}
 	st := testSetup(t)
 	pinned.Apply(st, "v0.1.0")
-	if exports := InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.0'") || !strings.Contains(exports, "export ATE_IMAGE_REPO="+ShellQuote(ReleaseRepo)) {
+	if exports := InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.0'") || !strings.Contains(exports, "export ATE_IMAGE_REPO="+ShellQuote(testImageRepo)) {
 		t.Errorf("digest-only exports:\n%s", exports)
 	}
 }
@@ -279,12 +279,12 @@ func TestParseProbeReadsTheCommitOffTheRunningBinary(t *testing.T) {
 // under the old version.
 func TestExportsUnsetTheOtherImageFamily(t *testing.T) {
 	st := testSetup(t)
-	prebuilt := Probe{ImageRepo: ReleaseRepo, ImageTag: "v0.1.0"}.Exports(st, "v0.1.0")
+	prebuilt := Probe{ImageRepo: testImageRepo, ImageTag: "v0.1.0"}.Exports(st, "v0.1.0")
 	source := Probe{KoDockerRepo: "gcr.io/acme/ate-images"}.Exports(st, "substrate-0123456789ab")
 	probe := `; printf '%s|%s|%s|%s' "${ATE_IMAGE_REPO:-unset}" "${ATE_IMAGE_TAG:-unset}" "${KO_DOCKER_REPO:-unset}" "$VERSION"`
 	for name, tc := range map[string]struct{ script, want string }{
 		"prebuilt then source": {prebuilt + "\n" + source, "unset|unset|gcr.io/acme/ate-images|substrate-0123456789ab"},
-		"source then prebuilt": {source + "\n" + prebuilt, ReleaseRepo + "|v0.1.0|unset|v0.1.0"},
+		"source then prebuilt": {source + "\n" + prebuilt, testImageRepo + "|v0.1.0|unset|v0.1.0"},
 	} {
 		out, err := exec.Command("bash", "-euo", "pipefail", "-c", tc.script+probe).Output()
 		if err != nil || string(out) != tc.want {

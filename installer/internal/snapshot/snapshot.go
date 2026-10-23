@@ -50,43 +50,31 @@ const (
 	// install skips the build, not the tree, because ate-setup reads the
 	// manifests from source.
 	//
-	// The step offers this as the manifest revision behind the pre-built
-	// images, so it has to be the commit ReleaseVersion was built from. The
-	// build-from-source track offers its repository's live HEAD instead and
-	// only falls back here for --dry-run, which resolves nothing.
+	// The images step offers this on both tracks: as the revision a build
+	// from source starts at, and as the manifest revision behind pre-built
+	// images, which have to have been built from it.
 	//
-	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the commit upstream's v0.4.0
-	// tag names, which is also the head of its release-0.4 branch,
-	// ReleaseVersion being the GKE build of it.
+	// It is a release commit rather than a commit of main: the commit
+	// upstream's v0.6.0 tag names, which is also the head of its release-0.6
+	// branch.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "756c2a53741121e728f4cc3066c8a19e575b4919"
+	Commit = "d3f2363590a11b2f50489971985ba033b4c9eff7"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
 	// when checking Go before the first fetch.
 	MinGoVersion = "1.27.0"
-
-	// ReleaseRepo publishes the GKE Substrate release images, and is the
-	// registry the wizard offers by default. It is read-only to installs:
-	// images are pulled from it and never pushed to it, which is why
-	// installing pre-built images leaves KO_DOCKER_REPO out of the picture
-	// entirely rather than pointing it here.
-	ReleaseRepo = "us-docker.pkg.dev/gke-substrate-release/substrate"
-
-	// ReleaseVersion is the tag the wizard offers by default, published from
-	// Commit — the two move together, because the manifests read out of that
-	// tree have to match the images this tag names.
-	//
-	// Both of these are defaults, not limits: the wizard takes any registry
-	// and tag the user types, so a team installing its own published build
-	// never has to fall back to building from source. It asks such a team for
-	// a manifest revision as well, since only this registry is published
-	// alongside a tree known to match.
-	ReleaseVersion = "v0.4.0-gke.0"
 )
+
+// There is no default image registry. The GKE release registry
+// (us-docker.pkg.dev/gke-substrate-release/substrate) is deprecated and has no
+// images for Commit, and no registry replaces it yet, so a pre-built install
+// names the registry and tag of images published for Commit, or for whatever
+// commit it gives the images step. A registry is read-only to an install:
+// images are pulled from it and never pushed to it, which is why installing
+// pre-built images leaves KO_DOCKER_REPO out of the picture.
 
 // TransferGSAName is the snapshot transfer service account's name: what
 // setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given
@@ -799,8 +787,8 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		// only part a pre-built one does not have, so a dry run of one must
 		// not print it. Nothing replaces it: pulling a digest is silent.
 		sim = append(sim,
-			"Building github.com/agent-substrate/substrate/cmd/ate-api-server",
-			"Building github.com/agent-substrate/substrate/cmd/atelet",
+			"Building go.ate.dev/substrate/cmd/ate-api-server",
+			"Building go.ate.dev/substrate/cmd/atelet",
 		)
 	}
 	return execx.Spec{

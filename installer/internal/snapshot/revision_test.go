@@ -38,9 +38,6 @@ func TestResolveRejectsNonURLRepositories(t *testing.T) {
 		if _, err := Resolve(context.Background(), repo, "main", false); err == nil {
 			t.Errorf("Resolve accepted %q as a repository", repo)
 		}
-		if _, err := Head(context.Background(), repo); err == nil {
-			t.Errorf("Head accepted %q as a repository", repo)
-		}
 	}
 }
 

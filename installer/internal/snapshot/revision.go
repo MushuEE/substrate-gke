@@ -80,19 +80,6 @@ func Resolve(ctx context.Context, repo, ref string, needImageFlags bool) (Revisi
 	return rev, nil
 }
 
-// Head resolves a repository's default branch and nothing more. It backs the
-// revision the wizard prefills, which is a guess made while the user is still
-// typing: it costs one `ls-remote` rather than the several seconds a fetch
-// negotiation takes, and it is re-resolved through Resolve — verification and
-// all — when the user submits.
-func Head(ctx context.Context, repo string) (Revision, error) {
-	repo = strings.TrimSpace(repo)
-	if err := checkRepoURL(repo); err != nil {
-		return Revision{}, err
-	}
-	return lookup(ctx, repo, "")
-}
-
 // lookup names the commit a ref points at, without asking whether the remote
 // will serve it.
 func lookup(ctx context.Context, repo, ref string) (Revision, error) {

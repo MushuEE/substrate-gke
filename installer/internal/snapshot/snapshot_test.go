@@ -486,8 +486,8 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 	prebuilt.ImageTag = "v0.1.0-gke.1@sha256:" + strings.Repeat("ab", 32)
 	prebuiltScript := b.DeployDemo(prebuilt, "counter").Argv[2]
 	for _, want := range []string{
-		"ATEOM_REF=" + ShellQuote(ReleaseRepo+"/ateom-microvm:v0.1.0-gke.1"),
-		"COUNTER_REF=" + ShellQuote(ReleaseRepo+"/counter:v0.1.0-gke.1"),
+		"ATEOM_REF=" + ShellQuote(testImageRepo+"/ateom-microvm:v0.1.0-gke.1"),
+		"COUNTER_REF=" + ShellQuote(testImageRepo+"/counter:v0.1.0-gke.1"),
 		`ATEOM_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${ATEOM_REF}")`,
 		`COUNTER_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${COUNTER_REF}")`,
 		`sed -i.bak "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|${ATEOM_REF}@${ATEOM_DIGEST}|g"`,
@@ -602,7 +602,7 @@ func TestMicroVMDemoPrefersAteSetup(t *testing.T) {
 	prebuilt := prebuiltSetup(t)
 	prebuilt.SandboxClass = state.SandboxMicroVM
 	prebuilt.MicroVMDeployed = true
-	imageFlags := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
+	imageFlags := " --image-repo " + ShellQuote(testImageRepo) + " --image-tag " + ShellQuote(testImageTag)
 
 	for name, tc := range map[string]struct {
 		st           *state.Setup
@@ -679,7 +679,7 @@ func TestMicroVMDemoBranchesOnTheTree(t *testing.T) {
 	}{
 		{"source, new tree", source, true, "go run ./cmd/ate-setup deploy demo counter-microvm KO=unset", viaAteSetup},
 		{"source, old tree", source, false, "install-ate.sh --deploy-demo-counter-microvm", viaInstallAte},
-		{"pre-built, new tree", prebuilt, true, "go run ./cmd/ate-setup deploy demo counter-microvm --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion + " KO=unset", viaAteSetup},
+		{"pre-built, new tree", prebuilt, true, "go run ./cmd/ate-setup deploy demo counter-microvm --image-repo " + testImageRepo + " --image-tag " + testImageTag + " KO=unset", viaAteSetup},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -863,6 +863,13 @@ func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
 		t.Error("a marked checkout must count as fetched")
 	}
 }
+
+// testImageRepo and testImageTag stand in for a published image set. No
+// registry is published by default, so a pre-built install always names one.
+const (
+	testImageRepo = "registry.example.com/substrate"
+	testImageTag  = "v0.6.0"
+)
 
 func testSetup(t *testing.T) *state.Setup {
 	t.Helper()
@@ -1253,7 +1260,7 @@ func TestDeployAteSystemCredentialProvider(t *testing.T) {
 // finding out once the cluster is half installed.
 func TestCheckImageTag(t *testing.T) {
 	ok := []string{
-		ReleaseVersion,
+		testImageTag,
 		"v0.1.0@sha256:" + strings.Repeat("ab", 32), // the digest is not part of the version
 		"40ca1ce6",
 		"1",
@@ -1287,7 +1294,7 @@ func prebuiltSetup(t *testing.T) *state.Setup {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
 	st.ProjectNumber = "42"
-	st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 	if err := st.ApplyProjectDefaults(); err != nil {
 		t.Fatalf("ApplyProjectDefaults: %v", err)
 	}
@@ -1313,7 +1320,7 @@ func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
 	// VERSION names the atelet DaemonSet and labels the nodes, so it has to be
 	// the tag the images came from — not b.Version, which describes the
 	// checkout, and not whatever the caller's shell happens to export.
-	if want := "VERSION=" + ReleaseVersion; !slices.Contains(env, want) {
+	if want := "VERSION=" + testImageTag; !slices.Contains(env, want) {
 		t.Errorf("pre-built env missing %q: %v", want, env)
 	}
 	// The rest of the dev-env contract still applies: the checkout is fetched
@@ -1333,8 +1340,8 @@ func TestPrebuiltDeployPassesTheImageFlags(t *testing.T) {
 
 	// A tag is user input, so the script quotes it; Display is prose the user
 	// reads, so it does not.
-	wantArgv := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
-	wantDisplay := " --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion
+	wantArgv := " --image-repo " + ShellQuote(testImageRepo) + " --image-tag " + ShellQuote(testImageTag)
+	wantDisplay := " --image-repo " + testImageRepo + " --image-tag " + testImageTag
 	for _, spec := range []execx.Spec{b.DeployAteSystem(st), b.DeployDemo(st, "counter")} {
 		if !strings.Contains(spec.Argv[2], wantArgv) {
 			t.Errorf("%s argv missing the image flags:\n%s", spec.Label, spec.Argv[2])
@@ -1530,7 +1537,7 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
 	st.KoDockerRepo = ""
-	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", ReleaseRepo, "v0.1.0"
+	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", testImageRepo, "v0.1.0"
 
 	installed := InstalledExports(st)
 	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "export KO_DOCKER_REPO") {
@@ -1565,7 +1572,7 @@ func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
 		t.Error("the agentgateway router builds nothing with docker")
 	}
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
-	st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.2.0"
+	st.ImageRepo, st.ImageTag = testImageRepo, "v0.2.0"
 	if b.BuildsWithDocker(st) {
 		t.Error("a pre-built install must not need docker")
 	}
@@ -1610,7 +1617,7 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
 			st.KoDockerRepo = tc.override
 			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+				st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 			}
 			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), tc.managed)
 			b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
@@ -1645,7 +1652,7 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 		{"explicit default", "ate-images", "", "", " --delete-repository"},
 		{"custom repository", "build-images", "", "", " --repository 'build-images' --delete-repository"},
 		{"custom registry", "build-images", "registry.example.com/shared", "", ""},
-		{"prebuilt images", "build-images", "", ReleaseRepo, ""},
+		{"prebuilt images", "build-images", "", testImageRepo, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := testSetup(t)
@@ -1673,11 +1680,11 @@ func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := testSetup(t)
 			st.Upgrade = true
-			st.InstalledCommit, st.InstalledVersion = Commit, ReleaseVersion
-			st.InstalledImageRepo, st.InstalledImageTag = ReleaseRepo, ReleaseVersion
+			st.InstalledCommit, st.InstalledVersion = Commit, testImageTag
+			st.InstalledImageRepo, st.InstalledImageTag = testImageRepo, testImageTag
 			st.Zone, st.ArtifactRegistryRepository, st.KoDockerRepo = tc.zone, tc.repository, tc.registry
 			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.3.0"
+				st.ImageRepo, st.ImageTag = testImageRepo, "v0.3.0"
 			}
 			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: tc.envoy})

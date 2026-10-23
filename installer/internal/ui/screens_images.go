@@ -26,13 +26,10 @@ import (
 )
 
 // resolvedMsg carries the outcome of resolving a typed revision to a commit.
-// prefill marks the speculative HEAD lookup that fills the field in, as
-// opposed to the resolution the user asked for by pressing enter.
 type resolvedMsg struct {
-	owner   *imagesScreen
-	rev     snapshot.Revision
-	err     error
-	prefill bool
+	owner *imagesScreen
+	rev   snapshot.Revision
+	err   error
 }
 
 // imagesScreen asks where the Substrate images come from: the published
@@ -83,48 +80,47 @@ func newInput(value, placeholder string) textinput.Model {
 	return in
 }
 
-// enterRelease offers the registry and version the installer maintains, both
-// editable: a team publishing its own builds, a staging registry or a private
-// rebuild of a release, installs them by typing them here rather than by
-// building from source.
+// enterRelease asks for the registry and tag of published images. Neither
+// has a default: no registry is published for the pin (see the note above
+// snapshot.Commit's declaration), so a team installs its own published
+// build, a staging registry or a private rebuild by typing them here.
 //
 // The commit the images were built from comes with them, because ate-setup
-// reads the manifests from the Substrate tree at that commit and only the
-// release registry is published with a commit known to match. Overriding the
-// registry without moving this too would install someone's images behind the
-// release's manifests.
+// reads the manifests from the Substrate tree at that commit. It defaults to
+// the pin, which only fits images built from the pin.
 func (s *imagesScreen) enterRelease() tea.Cmd {
 	s.mode, s.focus, s.errText, s.note = "release", 0, "", ""
 	s.labels = []string{"Image registry", "Image tag", "Commit the images were built from"}
 	s.fields = []textinput.Model{
-		newInput(snapshot.ReleaseRepo, snapshot.ReleaseRepo),
-		newInput(snapshot.ReleaseVersion, snapshot.ReleaseVersion),
+		newInput("", "registry.example.com/substrate"),
+		newInput("", "the tag your images were published under"),
 		newInput(snapshot.Commit, snapshot.Commit),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
 
-// enterSource offers a revision of the Substrate repository, and starts
-// resolving its HEAD so the field can show a commit id rather than an empty
-// box. Anything the user types wins over the prefill.
+// enterSource offers a revision of the Substrate repository, prefilled with
+// the pin: the revision this installer was checked against, rather than a
+// moving branch that may already need settings it does not pass. Anything the
+// user types replaces it.
 func (s *imagesScreen) enterSource() tea.Cmd {
 	s.mode, s.focus, s.errText, s.note = "source", 0, "", ""
 	s.labels = []string{"Branch, tag, or commit"}
-	s.fields = []textinput.Model{newInput("", "resolving the current HEAD…")}
-	return tea.Batch(s.fields[0].Focus(), textinput.Blink, s.resolve("", true))
+	s.fields = []textinput.Model{newInput(snapshot.Commit, "branch, tag, or full commit SHA")}
+	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
 
 // resolve turns a revision of the Substrate repository into an exact commit
 // off the main loop, since it talks to the remote. A dry run resolves nothing
 // and keeps the pin: the point of --dry-run is to walk the wizard without
 // reaching out.
-func (s *imagesScreen) resolve(ref string, prefill bool) tea.Cmd {
+func (s *imagesScreen) resolve(ref string) tea.Cmd {
 	const repo = snapshot.RepoURL
 	if s.deps.DryRun {
 		return func() tea.Msg {
 			return resolvedMsg{s, snapshot.Revision{
 				Repo: repo, Commit: snapshot.Commit, Describe: "(dry-run) " + snapshot.ShortCommit(),
-			}, nil, prefill}
+			}, nil}
 		}
 	}
 	// Only the pre-built track passes --image-repo, so only it needs a tree
@@ -133,14 +129,8 @@ func (s *imagesScreen) resolve(ref string, prefill bool) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	return func() tea.Msg {
-		if prefill {
-			// A guess made while the user is still typing, so it skips the
-			// fetch negotiation Resolve does; submitting re-resolves it.
-			rev, err := snapshot.Head(ctx, repo)
-			return resolvedMsg{s, rev, err, true}
-		}
 		rev, err := snapshot.Resolve(ctx, repo, ref, needImageFlags)
-		return resolvedMsg{s, rev, err, false}
+		return resolvedMsg{s, rev, err}
 	}
 }
 
@@ -197,7 +187,7 @@ func (s *imagesScreen) submitRelease() tea.Cmd {
 	}
 	s.errText = ""
 	s.resolving = true
-	return s.resolve(rev, false)
+	return s.resolve(rev)
 }
 
 // submitSource resolves what the user typed and, once it names a commit,
@@ -205,7 +195,7 @@ func (s *imagesScreen) submitRelease() tea.Cmd {
 func (s *imagesScreen) submitSource() tea.Cmd {
 	s.errText = ""
 	s.resolving = true
-	return s.resolve(s.value(0), false)
+	return s.resolve(s.value(0))
 }
 
 // useSource points the run at a tree.
@@ -218,22 +208,6 @@ func (s *imagesScreen) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
 	case resolvedMsg:
 		if m.owner != s || s.fields == nil {
-			return nil
-		}
-		if m.prefill {
-			if s.mode != "source" {
-				return nil
-			}
-			if m.err != nil {
-				s.fields[0].Placeholder = "branch, tag, or full commit SHA"
-				s.note = "Could not read the default branch: " + m.err.Error()
-				return nil
-			}
-			// The lookup raced the user; what is on screen now is the answer.
-			if s.value(0) != "" {
-				return nil
-			}
-			s.fields[0].SetValue(m.rev.Commit)
 			return nil
 		}
 		if !s.resolving {
@@ -315,10 +289,10 @@ func (s *imagesScreen) View(w int) string {
 
 	if s.mode == "choose" {
 		options := []struct{ name, desc string }{
-			{"[1] Install pre-built images (recommended)",
-				"Defaults to the " + snapshot.ReleaseVersion + " release at\n" + snapshot.ReleaseRepo + ";\nany registry and tag can be given instead. Nothing is built or pushed."},
+			{"[1] Install pre-built images",
+				"Pulls every image from a registry and tag you give. No registry is\npublished by default, so this needs images published for the commit\nyou install. Nothing is built or pushed."},
 			{"[2] Build from source",
-				"Builds every image with ko from a commit of the Substrate repository\nand pushes them to your own registry. Pick this for a branch or a commit\nthat has no published images."},
+				"Builds every image with ko from a commit of the Substrate repository,\n" + snapshot.ShortCommit() + " by default, and pushes them to your own registry. Pick\nthis when you have no published images."},
 		}
 		if s.deps.DockerWarned {
 			options[1].desc += "\n" + theme.Warning.Render(
@@ -355,18 +329,10 @@ func (s *imagesScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.errText)))
 	case s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
-	// The tag counts as much as the registry: the offered manifest commit is
-	// the one the offered tag was built from, so a newer tag out of the same
-	// registry is just as capable of running behind manifests that predate it.
-	case s.mode == "release" && (s.value(0) != snapshot.ReleaseRepo || s.value(1) != snapshot.ReleaseVersion):
-		b.WriteString(theme.Warning.Render(
-			"Only " + snapshot.ReleaseRepo + ":" + snapshot.ReleaseVersion + "\n" +
-				"is published with manifests known to match. Give the commit these\n" +
-				"images were built from; the manifests are read from it."))
 	case s.mode == "release":
-		b.WriteString(theme.Subtle.Render("Defaults to the published release; override any of these to install your\nown build. Every image is pulled at this tag and pinned to the digest it\nnames, and ate-setup reads the manifests from the commit above."))
+		b.WriteString(theme.Subtle.Render("No registry is published by default. Give the registry and tag of your\nimages, and the commit they were built from: ate-setup reads the manifests\nfrom it. Every image is pulled at this tag and pinned to the digest it names."))
 	default:
-		b.WriteString(theme.Subtle.Render("Defaults to the repository's current HEAD, shown as a commit id.\nOverride it with a branch, a tag, or a full commit SHA."))
+		b.WriteString(theme.Subtle.Render("Defaults to " + snapshot.ShortCommit() + ", the revision this installer is pinned to.\nOverride it with a branch, a tag, or a full commit SHA."))
 	}
 	// An unmanaged root is a checkout the user handed us with --substrate-root,
 	// and it is used exactly as it stands: nothing is fetched, so the commit

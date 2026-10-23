@@ -90,7 +90,7 @@ func Deploy(prebuilt bool) []ChecklistItem {
 	}
 	if !prebuilt {
 		items = append(items, ChecklistItem{
-			"Build control-plane images from source (ko)", containsAny("Building github.com/", "Publishing "),
+			"Build control-plane images from source (ko)", containsAny("Building github.com/", "Building go.ate.dev/", "Publishing "),
 		})
 	}
 	return append(items, ChecklistItem{

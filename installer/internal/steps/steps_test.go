@@ -89,6 +89,20 @@ func TestDeployChecklistTracksAteSetupOutput(t *testing.T) {
 	}
 }
 
+// From v0.6.0 the module is go.ate.dev/substrate, and ko names what it builds
+// by that path; the build row has to light for both.
+func TestDeployChecklistTracksAVanityImportBuild(t *testing.T) {
+	items := Deploy(false)
+	lines := []string{
+		"[step]: deploy_crds",
+		"[step]: ensure_apiserver_prerequisites",
+		"Building go.ate.dev/substrate/cmd/atelet for linux/amd64",
+	}
+	if got := feed(items, lines); got != 2 {
+		t.Fatalf("active = %d, want 2 (ko build phase)", got)
+	}
+}
+
 func TestProgressNeverMovesBackward(t *testing.T) {
 	items := Deploy(false)
 	// A late ko "Building" line must not rewind past the wait phase.

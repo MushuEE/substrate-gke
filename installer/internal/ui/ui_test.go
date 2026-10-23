@@ -91,6 +91,27 @@ func key(s string) tea.Msg {
 	}
 }
 
+// testImageRepo and testImageTag stand in for a published image set. No
+// registry is published by default, so the pre-built track always types one.
+const (
+	testImageRepo = "registry.example.com/substrate"
+	testImageTag  = "v0.6.0"
+)
+
+// typeReleaseImages fills the pre-built track's registry and tag and accepts
+// the manifest commit, from the registry field to the next step. Each value
+// goes in as one pasted key message rather than a message per character:
+// every message is a full pump through the app, and the walks that call this
+// would otherwise push the package past go test's 10 minute default.
+func typeReleaseImages(t *testing.T, app *App) {
+	t.Helper()
+	typeText(t, app, testImageRepo)
+	pump(t, app, key("enter"))
+	typeText(t, app, testImageTag)
+	pump(t, app, key("enter"))
+	pump(t, app, key("enter"))
+}
+
 func testApp(t *testing.T) *App {
 	t.Helper()
 	deps := &Deps{
@@ -128,14 +149,15 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after doctor: %v", app.mach.Current())
 	}
-	// Take the pre-built images: enter picks them, then the offered registry,
-	// tag and commit are accepted in turn. Nothing is built, so the project is
-	// never asked for a registry to push to.
-	press("enter", "enter", "enter", "enter")
+	// Take the pre-built images: enter picks them, then a registry and tag are
+	// typed and the offered commit is accepted. Nothing is built, so the
+	// project is never asked for a registry to push to.
+	press("enter")
+	typeReleaseImages(t, app)
 	if app.mach.Current() != state.Project {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
-	if app.deps.Setup.ImageRepo != snapshot.ReleaseRepo || app.deps.Setup.ImageTag != snapshot.ReleaseVersion {
+	if app.deps.Setup.ImageRepo != testImageRepo || app.deps.Setup.ImageTag != testImageTag {
 		t.Fatalf("images step did not record the release: %+v", app.deps.Setup)
 	}
 	// Project ID was prefilled by the dry-run gcloud client; enter moves
@@ -204,12 +226,13 @@ func TestCreateNewClusterPath(t *testing.T) {
 		}
 	}
 
-	press("enter")                            // welcome
-	press("enter")                            // doctor
-	press("enter", "enter", "enter", "enter") // images: pre-built (the default), then its three fields
-	press("enter", "enter", "enter")          // project fields (pid, zone, bucket)
-	press("7", "enter")                       // "create a new cluster" row (6 clusters + create)
-	pump(t, app, key("enter"))                // accept the default name
+	press("enter") // welcome
+	press("enter") // doctor
+	press("enter") // images: pre-built
+	typeReleaseImages(t, app)
+	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
+	press("7", "enter")              // "create a new cluster" row (6 clusters + create)
+	pump(t, app, key("enter"))       // accept the default name
 	if app.mach.Current() != state.Provision {
 		t.Fatalf("after cluster create: %v", app.mach.Current())
 	}
@@ -292,10 +315,11 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 		}
 	}
 
-	press("enter")                            // welcome
-	press("enter")                            // doctor
-	press("enter", "enter", "enter", "enter") // images: pre-built, then its three fields
-	press("enter", "enter", "enter")          // project fields (pid, zone, bucket)
+	press("enter") // welcome
+	press("enter") // doctor
+	press("enter") // images: pre-built
+	typeReleaseImages(t, app)
+	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
 	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
 	press("2", "enter")
 	press("y")
@@ -330,8 +354,9 @@ func TestCustomBucketNameQuickstartTrack(t *testing.T) {
 	press("enter")
 	// Doctor: continue (enter)
 	press("enter")
-	// Images: pre-built, then the offered registry, tag and commit
-	press("enter", "enter", "enter", "enter")
+	// Images: pre-built, a registry and tag, and the offered commit
+	press("enter")
+	typeReleaseImages(t, app)
 	// Project screen:
 	// fields: 0:ProjectID, 1:Zone, 2:Bucket
 	press("enter", "enter")
@@ -366,7 +391,7 @@ func TestCustomBucketNameAdvancedTrack(t *testing.T) {
 	press("2", "enter")
 	// Doctor: continue
 	press("enter")
-	// Images: build from source, keeping the HEAD commit the screen resolved.
+	// Images: build from source, keeping the pinned commit the screen offers.
 	// Only this path asks for a registry.
 	press("2", "enter")
 	press("enter")
@@ -397,7 +422,7 @@ func TestAdvancedProjectScreenAsksForARegistryOnlyWhenBuilding(t *testing.T) {
 		app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: snapshot.Commit})
 		app.deps.Setup.Track = state.TrackAdvanced
 		if prebuilt {
-			app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+			app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = testImageRepo, testImageTag
 		}
 		var out []string
 		for _, f := range newProjectScreen(app.deps).fields {
@@ -455,7 +480,7 @@ func TestProjectRequestsRepositoryPermissionsOnlyWhenCreating(t *testing.T) {
 			st := app.deps.Setup
 			st.Track, st.ProjectID, st.KoDockerRepo = state.TrackAdvanced, "acme", tc.savedRegistry
 			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+				st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 			}
 			scr := newProjectScreen(app.deps)
 			for i, f := range scr.fields {
@@ -550,7 +575,7 @@ func TestProjectScreenChecksDockerOnlyForAnEnvoyBuild(t *testing.T) {
 	if app.deps.Setup.KoDockerRepo != "" {
 		t.Error("probing the registry must not commit it before the project validates")
 	}
-	app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	app.deps.Setup.ImageRepo, app.deps.Setup.ImageTag = testImageRepo, testImageTag
 	scr = newProjectScreen(app.deps)
 	st = scr.inputSetup("acme")
 	if got, _ := scr.dockerRegistry(&st); got != "" {
@@ -1304,8 +1329,8 @@ func TestImagesScreenBuildFromSourceRepointsTheBuilder(t *testing.T) {
 	}
 }
 
-// The published release is a default, not a limit: a team installing its own
-// published build types its registry here rather than building from source.
+// A team installing its own published build types its registry here rather
+// than building from source.
 func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
 	const registry = "us-west1-docker.pkg.dev/acme/substrate"
 	const tag = "40ca1ce6"
@@ -1355,6 +1380,7 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
 
 	scr := app.cur.(*imagesScreen)
@@ -1377,9 +1403,9 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 }
 
 // ate-setup reads the manifests from a checkout, so pre-built images come with
-// the commit to read them from: a registry that is not the release one has no
-// commit published alongside it, and the user says which one its images match.
-// Moving that commit moves the tree without turning the install into a build.
+// the commit to read them from: no registry has a commit published alongside
+// it, and the user says which one its images match. Moving that commit moves
+// the tree without turning the install into a build.
 func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
@@ -1387,7 +1413,9 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	pump(t, app, key("enter")) // welcome → doctor
 	pump(t, app, key("enter")) // doctor → images
 	pump(t, app, key("enter")) // pre-built images
+	typeText(t, app, testImageRepo)
 	pump(t, app, key("enter")) // registry → tag
+	typeText(t, app, testImageTag)
 	pump(t, app, key("enter")) // tag → commit
 
 	scr := app.cur.(*imagesScreen)
@@ -1408,11 +1436,11 @@ func TestImagesScreenTakesAManifestRevisionWithPrebuiltImages(t *testing.T) {
 	}
 }
 
+// typeText enters text into the focused field as one pasted key message; see
+// typeReleaseImages for why not a message per character.
 func typeText(t *testing.T, app *App, text string) {
 	t.Helper()
-	for _, r := range text {
-		pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
+	pump(t, app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true})
 }
 
 // TestDryRunUpgradeEndToEnd walks the upgrade track: welcome (upgrade) →
@@ -1450,11 +1478,12 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("installed cluster not read off the cluster: %+v", st)
 	}
 
-	press("enter", "enter", "enter", "enter") // the release, all three fields accepted
+	press("enter") // pre-built images, a registry and tag, the offered commit
+	typeReleaseImages(t, app)
 	if app.mach.Current() != state.UpgradePlan {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
-	if !st.Prebuilt() || st.ImageTag != snapshot.ReleaseVersion {
+	if !st.Prebuilt() || st.ImageTag != testImageTag {
 		t.Fatalf("images step did not record the release: %+v", st)
 	}
 	plan := app.cur.(*upgradePlanScreen)
@@ -1468,7 +1497,7 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.Complete || !app.Completed {
 		t.Fatalf("after plan: %v completed=%v", app.mach.Current(), app.Completed)
 	}
-	if view := app.View(); !strings.Contains(view, "UPGRADE PREPARED") || !strings.Contains(view, snapshot.ReleaseVersion) {
+	if view := app.View(); !strings.Contains(view, "UPGRADE PREPARED") || !strings.Contains(view, testImageTag) {
 		t.Errorf("final view:\n%s", view)
 	}
 }
@@ -1558,7 +1587,7 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 	press("enter", "enter", "enter", "m")
 	typeText(t, app, snapshot.Commit)
 	press("enter")
-	typeText(t, app, snapshot.ReleaseVersion)
+	typeText(t, app, testImageTag)
 	press("enter")
 	typeText(t, app, "gcr.io/acme/mirror")
 	press("enter")
@@ -1574,20 +1603,21 @@ func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T
 		t.Fatalf("after describing the cluster: %v", app.mach.Current())
 	}
 	st := app.deps.Setup
-	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != snapshot.ReleaseVersion || st.KoDockerRepo != "" {
+	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != testImageTag || st.KoDockerRepo != "" {
 		t.Fatalf("pre-built install not recorded: %+v", st)
 	}
-	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(snapshot.ReleaseVersion)) || strings.Contains(exports, "export KO_DOCKER_REPO") {
+	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(testImageTag)) || strings.Contains(exports, "export KO_DOCKER_REPO") {
 		t.Errorf("rollback exports for a pre-built install:\n%s", exports)
 	}
 
-	press("enter", "enter", "enter", "enter") // the release again, as installed
+	press("enter") // the installed images again
+	typeReleaseImages(t, app)
 	if app.mach.Current() != state.UpgradePlan {
 		t.Fatalf("after images: %v", app.mach.Current())
 	}
 	plan := app.cur.(*upgradePlanScreen)
 	if plan.blocked == "" || plan.comp != nil {
-		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", snapshot.ReleaseVersion, plan.blocked)
+		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", testImageTag, plan.blocked)
 	}
 	if view := app.View(); !strings.Contains(view, "same as the installed one") {
 		t.Errorf("plan view should say why:\n%s", view)
@@ -1806,7 +1836,10 @@ func TestBackFromCompleteClearsCompleted(t *testing.T) {
 	}
 	press("3", "enter", "enter")
 	typeText(t, app, "acme")
-	press("enter", "enter", "enter", "enter", "enter", "enter", "enter", "enter")
+	press("enter", "enter", "enter") // the installed cluster is read
+	press("enter")                   // pre-built images
+	typeReleaseImages(t, app)
+	press("enter") // the plan
 	if app.mach.Current() != state.Complete || !app.Completed {
 		t.Fatalf("expected the upgrade to be prepared: %v completed=%v", app.mach.Current(), app.Completed)
 	}
@@ -1845,10 +1878,11 @@ func pressToCluster(t *testing.T, app *App) func(keys ...string) {
 			pump(t, app, key(k))
 		}
 	}
-	press("enter")                            // welcome -> doctor
-	press("enter")                            // doctor -> images
-	press("enter", "enter", "enter", "enter") // release images -> project
-	press("enter", "enter", "enter")          // project fields -> cluster
+	press("enter") // welcome -> doctor
+	press("enter") // doctor -> images
+	press("enter") // pre-built images
+	typeReleaseImages(t, app)
+	press("enter", "enter", "enter") // project fields -> cluster
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
 	}
@@ -2250,7 +2284,7 @@ func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	press("2", "enter") // welcome: advanced track
 	press("enter")      // doctor
 	press("1", "enter") // images: pre-built, so the registry field is left out
-	press("enter", "enter", "enter")
+	typeReleaseImages(t, app)
 
 	view := app.View()
 	if !strings.Contains(view, "Cluster version") {
@@ -2309,7 +2343,7 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 	press("2", "enter") // welcome: advanced track
 	press("enter")      // doctor
 	press("1", "enter") // images: pre-built
-	press("enter", "enter", "enter")
+	typeReleaseImages(t, app)
 	press("enter", "enter", "enter", "enter", "enter", "enter") // to the version field
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
@@ -2585,7 +2619,7 @@ func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 	// the walk cost ~35 s of the ui package's 10-minute budget.
 	deps := testApp(t).deps
 	deps.Setup.Track = state.TrackAdvanced
-	deps.Setup.ImageRepo, deps.Setup.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	deps.Setup.ImageRepo, deps.Setup.ImageTag = testImageRepo, testImageTag
 	deps.Setup.ProjectID = "acme"
 	scr := newProjectScreen(deps)
 	set := func(label, value string) {
@@ -3500,7 +3534,7 @@ func TestProvisionChecksTheClusterRegionsRegistry(t *testing.T) {
 	if !slices.Contains(provision.comp.spec.Env, "KO_DOCKER_REPO=europe-west4-docker.pkg.dev/acme/ate-images") {
 		t.Fatal(provision.comp.spec.Env)
 	}
-	st.ImageRepo, st.ImageTag = snapshot.ReleaseRepo, snapshot.ReleaseVersion
+	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 	prebuilt := newProvisionScreen(app.deps)
 	prebuilt.Init()
 	defer prebuilt.comp.stop()
@@ -3564,5 +3598,34 @@ func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
 	provision := newProvisionScreen(app.deps)
 	if got := provision.comp.items[0].Label; got != "Fetch the selected substrate checkout (cccccccccccc)" {
 		t.Errorf("provision fetch row = %q", got)
+	}
+}
+
+// No registry is published by default, so the pre-built track offers no
+// registry or tag and refuses to go on without them. Its manifest commit, like
+// the source track's revision, starts at the pin.
+func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
+	app := testApp(t)
+	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+	pump(t, app, key("enter")) // welcome → doctor
+	pump(t, app, key("enter")) // doctor → images
+	pump(t, app, key("enter")) // pre-built images
+
+	scr := app.cur.(*imagesScreen)
+	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != snapshot.Commit {
+		t.Fatalf("pre-built fields = %q, %q, %q; want empty, empty, the pin", scr.value(0), scr.value(1), scr.value(2))
+	}
+	pump(t, app, key("enter"))
+	pump(t, app, key("enter"))
+	pump(t, app, key("enter")) // submit with nothing typed
+	if app.mach.Current() != state.Images || !strings.Contains(scr.errText, "registry is required") || scr.focus != 0 {
+		t.Fatalf("an empty registry was accepted: step=%v err=%q focus=%d", app.mach.Current(), scr.errText, scr.focus)
+	}
+
+	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the choice
+	pump(t, app, key("2"))
+	pump(t, app, key("enter")) // build from source
+	if got := scr.value(0); got != snapshot.Commit {
+		t.Errorf("source revision = %q, want the pin %s", got, snapshot.Commit)
 	}
 }
