@@ -83,6 +83,18 @@ const (
 // Substrate v0.6.0 refuses to deploy ate-api-server on GKE without it.
 const TransferGSAName = "ate-snapshot-transfer"
 
+// SnapshotLocation is ate-api-server's cluster-wide snapshot location: the
+// root of the install's snapshot bucket, as upstream's
+// hack/ate-dev-env.sh.example sets it. From Substrate v0.6.0, ate-setup
+// refuses to deploy without one unless the PerTemplateSnapshotLocation
+// preview gate is on (agent-substrate/substrate#2544); older trees ignore
+// it. A caller's SNAPSHOT_LOCATION is not honored, for the same reason
+// BUCKET_NAME is not: setup-gcp grants the transfer account access to this
+// bucket alone, so any other location would fail at the first suspend.
+func SnapshotLocation(st *state.Setup) string {
+	return "gs://" + st.BucketName + "/"
+}
+
 // ShortCommit is Commit abbreviated for display.
 func ShortCommit() string { return shorten(Commit) }
 
@@ -620,6 +632,7 @@ func (b *Builder) env(st *state.Setup) []string {
 		// it to ate-api-server's credential exchange, so both read it from
 		// here. Trees that predate the account ignore it.
 		"SNAPSHOT_TRANSFER_GSA_NAME=" + TransferGSAName,
+		"SNAPSHOT_LOCATION=" + SnapshotLocation(st),
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
 	}

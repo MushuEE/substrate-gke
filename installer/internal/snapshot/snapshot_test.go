@@ -1833,3 +1833,18 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 		t.Errorf("micro-VM with the driver: demo %v", demo)
 	}
 }
+
+// From v0.6.0 ate-setup needs a cluster-wide snapshot location. The install's
+// own bucket is the one setup-gcp grants access to, so both the deploy and the
+// upgrade hand-over name its root.
+func TestDeployAndUpgradeCarryTheSnapshotLocation(t *testing.T) {
+	st := testSetup(t)
+	st.BucketName = "ate-snapshots-acme-c-z"
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "SNAPSHOT_LOCATION=gs://ate-snapshots-acme-c-z/") {
+		t.Errorf("deploy env lacks the snapshot location: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export SNAPSHOT_LOCATION='gs://ate-snapshots-acme-c-z/'") {
+		t.Errorf("upgrade exports lack the snapshot location:\n%s", exports)
+	}
+}
