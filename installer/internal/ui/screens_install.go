@@ -330,6 +330,9 @@ func (s *controlPlaneScreen) View(w int) string {
 		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
+	if snapshot.EnvoyRouter() {
+		subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary() + "."
+	}
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 
@@ -1154,15 +1157,26 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
-	portForward, demo := s.deps.Builder.NextSteps(st)
-	next := theme.Title.Render("Next steps") + "\n" +
-		theme.CommandLine.Render(portForward)
+	lead, demo := s.deps.Builder.NextSteps(st)
+	next := theme.Title.Render("Next steps")
+	if lead != "" {
+		next += "\n" + theme.CommandLine.Render(lead)
+	}
 	if st.DemoDeployed {
-		next += "\n" + theme.Subtle.Render("then, to try the "+DemoName(st)+" demo:")
+		intro := "then, to try the " + DemoName(st) + " demo:"
+		if lead == "" {
+			intro = "To try the " + DemoName(st) + " demo:"
+		}
+		next += "\n" + theme.Subtle.Render(intro)
 		for _, cmd := range demo {
 			next += "\n" + theme.CommandLine.Render(cmd)
 		}
 	}
-	b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 92)).Render(next))
+	panelWidth := min(w-4, 92)
+	if note := s.deps.Builder.RouterNote(); note != "" {
+		// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
+		next += "\n" + theme.Subtle.Width(max(panelWidth-4, 20)).Render(note)
+	}
+	b.WriteString("\n" + theme.AccentPanel.Width(panelWidth).Render(next))
 	return b.String()
 }

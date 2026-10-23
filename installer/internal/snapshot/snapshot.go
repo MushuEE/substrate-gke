@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -367,7 +368,16 @@ func (b *Builder) KubectlAteInstall() string {
 // before, so bumping Commit means re-checking this function. Nothing here is
 // executed by the wizard, so no test will catch the drift — the user is the
 // one who runs it.
-func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
+//
+// What a user can run depends on the router. agentgateway serves plain HTTP
+// on port 80, so the tour port-forwards it and curls the actor. The Envoy
+// router, upstream's default, serves only TLS and admits only clients that
+// present an allowlisted pod certificate (see RouterNote), so a curl from the
+// user's machine is refused. A tree with the counter demo's driver
+// (agent-substrate/substrate#3178) runs such a client in the demo namespace,
+// and the tour reads its logs; without one, the tour stops at creating the
+// actor. lead is "" when there is nothing to run before the demo.
+func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 	// The atespace and ActorTemplate the counter demo creates. `ate-setup
 	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
 	// `hack/install-ate.sh --deploy-demo-counter-microvm` all create the
@@ -379,15 +389,53 @@ func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string)
 		demoTemplate = "counter-microvm"
 	}
 
+	if EnvoyRouter() && b.hasCounterDriver() {
+		return "", []string{"kubectl logs -n " + demoAtespace + " -l app=counter-driver -f"}
+	}
+
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if b.Managed {
 		installAte = b.KubectlAteInstall()
 	}
+	createActor := "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate
+	if EnvoyRouter() {
+		return "", []string{installAte, createActor}
+	}
 	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
 		installAte,
-		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate,
+		createActor,
 		`curl -X POST -H "ate-target-actor: ` + demoAtespace + `/my-counter-1" http://localhost:8000/`,
 	}
+}
+
+// CounterDriverDir is the counter demo's driver, an in-cluster client of the
+// Envoy router (agent-substrate/substrate#3178).
+const CounterDriverDir = "demos/counter/driver"
+
+// hasCounterDriver reports whether the fetched tree has CounterDriverDir. By
+// the time next steps are shown, the demo step has fetched the tree.
+func (b *Builder) hasCounterDriver() bool {
+	info, err := os.Stat(filepath.Join(b.Root, CounterDriverDir))
+	return err == nil && info.IsDir()
+}
+
+// RouterNote explains how to reach actors through the Envoy router, which
+// admits only allowlisted clients, or is "" for agentgateway, which admits
+// anyone.
+func (b *Builder) RouterNote() string {
+	if !EnvoyRouter() {
+		return ""
+	}
+	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
+		IngressAllowlistSummary() + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
+		" and the substrate-gke README."
+}
+
+// RouterAuthURL is upstream's documentation of ingress client authentication
+// at the commit this install runs.
+func (b *Builder) RouterAuthURL() string {
+	return "https://github.com/agent-substrate/substrate/blob/" + b.commit +
+		"/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization"
 }
 
 // ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
@@ -795,7 +843,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     append(b.env(st), credentialProviderEnv()...),
+		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -827,6 +875,57 @@ func credentialProviderEnv() []string {
 		return nil
 	}
 	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
+}
+
+// DemoClientSPIFFEIDs are the identities of the counter demos' driver pods,
+// which call their actors through the ingress router
+// (agent-substrate/substrate#3178). The pod identity signer issues
+// spiffe://cluster.local/ns/<namespace>/sa/<service-account>, with the trust
+// domain fixed; ate-setup fixes the demo namespaces, and the drivers run as
+// their namespace's default service account. Both are listed whatever demo
+// the run picks, because the allowlist is set when the control plane is
+// deployed, before the sandbox and demo steps.
+var DemoClientSPIFFEIDs = []string{
+	"spiffe://cluster.local/ns/ate-demo-counter/sa/default",
+	"spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default",
+}
+
+// IngressAllowedSPIFFEIDs is the Envoy ingress router's client allowlist:
+// DemoClientSPIFFEIDs, then the caller's comma-separated
+// ATE_INGRESS_ALLOWED_SPIFFE_IDS, without duplicates. ate-setup reads the
+// variable as one value and does not combine it with anything, so the
+// installer joins the two lists itself. From Substrate v0.6.0, ate-setup
+// refuses to deploy the Envoy router without an allowlist; older trees and
+// the agentgateway router ignore it.
+func IngressAllowedSPIFFEIDs() []string {
+	ids := slices.Clone(DemoClientSPIFFEIDs)
+	for _, id := range strings.Split(os.Getenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS"), ",") {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// callerSPIFFEIDs is how many of IngressAllowedSPIFFEIDs came from the caller.
+func callerSPIFFEIDs() int {
+	return len(IngressAllowedSPIFFEIDs()) - len(DemoClientSPIFFEIDs)
+}
+
+// IngressAllowlistSummary describes the allowlist for the control-plane
+// screen: the demo drivers, and how many identities the caller added.
+func IngressAllowlistSummary() string {
+	if n := callerSPIFFEIDs(); n > 0 {
+		return fmt.Sprintf("the counter demo drivers, plus %d from ATE_INGRESS_ALLOWED_SPIFFE_IDS", n)
+	}
+	return "the counter demo drivers (add your own callers with ATE_INGRESS_ALLOWED_SPIFFE_IDS)"
+}
+
+// ingressAllowlistEnv passes IngressAllowedSPIFFEIDs to ate-setup. It
+// replaces any ATE_INGRESS_ALLOWED_SPIFFE_IDS the caller exported, whose IDs
+// it already includes.
+func ingressAllowlistEnv() []string {
+	return []string{"ATE_INGRESS_ALLOWED_SPIFFE_IDS=" + strings.Join(IngressAllowedSPIFFEIDs(), ",")}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in

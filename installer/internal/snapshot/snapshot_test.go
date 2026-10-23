@@ -439,6 +439,7 @@ func TestSpecsBlankAnInheritedKubectlContext(t *testing.T) {
 }
 
 func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
 	st := testSetup(t)
 	st.SandboxClass = state.SandboxMicroVM
 	b := NewBuilder(fakeCheckout(t), false)
@@ -1760,5 +1761,75 @@ func TestFetchLabelNamesTheRevision(t *testing.T) {
 	local := NewBuilder(root, false)
 	if got, want := local.FetchLabel(), "Use the substrate checkout at "+root; got != want {
 		t.Errorf("local tree: %q, want %q", got, want)
+	}
+}
+
+// The allowlist is the demo drivers' identities, then the caller's, trimmed
+// and without duplicates, because ate-setup reads one value.
+func TestIngressAllowedSPIFFEIDsAppendsTheCallers(t *testing.T) {
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", "")
+	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, DemoClientSPIFFEIDs) {
+		t.Errorf("without the variable: %v, want the demo drivers %v", got, DemoClientSPIFFEIDs)
+	}
+	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", " "+frontend+", ,"+DemoClientSPIFFEIDs[0])
+	want := append(slices.Clone(DemoClientSPIFFEIDs), frontend)
+	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, want) {
+		t.Errorf("with the variable: %v, want %v", got, want)
+	}
+	if got := IngressAllowlistSummary(); !strings.Contains(got, "plus 1 from ATE_INGRESS_ALLOWED_SPIFFE_IDS") {
+		t.Errorf("summary = %q", got)
+	}
+}
+
+// The control-plane deploy and the upgrade hand-over both carry the joined
+// list, replacing whatever the caller exported.
+func TestDeployAndUpgradeCarryTheIngressAllowlist(t *testing.T) {
+	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", frontend)
+	joined := strings.Join(append(slices.Clone(DemoClientSPIFFEIDs), frontend), ",")
+	st := testSetup(t)
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_INGRESS_ALLOWED_SPIFFE_IDS="+joined) {
+		t.Errorf("deploy env lacks the joined allowlist: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_INGRESS_ALLOWED_SPIFFE_IDS="+ShellQuote(joined)) {
+		t.Errorf("upgrade exports lack the joined allowlist:\n%s", exports)
+	}
+}
+
+// The tour depends on the router: agentgateway serves plain HTTP, the Envoy
+// router admits only allowlisted clients, and a tree with the counter driver
+// runs such a client.
+func TestNextStepsFollowTheRouter(t *testing.T) {
+	st := testSetup(t)
+	root := fakeCheckout(t)
+	b := NewBuilder(root, false)
+
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
+	lead, demo := b.NextSteps(st)
+	if !strings.Contains(lead, "port-forward") || !strings.Contains(strings.Join(demo, "\n"), "curl ") || b.RouterNote() != "" {
+		t.Errorf("agentgateway: lead %q, demo %v, note %q", lead, demo, b.RouterNote())
+	}
+
+	t.Setenv("ATE_ATENET_DATAPLANE", "")
+	lead, demo = b.NextSteps(st)
+	joined := strings.Join(demo, "\n")
+	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
+		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
+	}
+	if note := b.RouterNote(); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
+		t.Errorf("Envoy router note = %q", note)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, CounterDriverDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if lead, demo = b.NextSteps(st); lead != "" || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
+		t.Errorf("Envoy with the driver: lead %q, demo %v", lead, demo)
+	}
+	st.SandboxClass, st.MicroVMDeployed = state.SandboxMicroVM, true
+	if _, demo = b.NextSteps(st); !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter-microvm -l app=counter-driver -f"}) {
+		t.Errorf("micro-VM with the driver: demo %v", demo)
 	}
 }

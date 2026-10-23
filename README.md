@@ -15,6 +15,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 - [Quickstart](#quickstart)
 - [What the installer does](#what-the-installer-does)
 - [Sandbox runtimes](#sandbox-runtimes)
+- [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router)
 - [Where the images come from](#where-the-images-come-from)
 - [How Substrate itself is obtained](#how-substrate-itself-is-obtained)
 - [Logs](#logs)
@@ -69,7 +70,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
+| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router's client allowlist is set here too; see [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
 | 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
@@ -185,6 +186,64 @@ so the bucket assets and `microvm` `SandboxConfig` digests stay in sync. Full te
 resources automatically; if you want to drop micro-VM without tearing anything else down,
 run `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` against the cluster's kube
 context (the staged assets in `kata-assets/` remain inert in the bucket).
+
+## Reaching actors through the ingress router
+
+Requests reach actors through `atenet-router` in `ate-system`. From Substrate v0.6.0
+the default router is Envoy, which serves only TLS and admits only clients that
+present a pod certificate whose SPIFFE ID is on its allowlist. Any listed client may
+reach any actor. `ate-setup` will not deploy the Envoy router without an allowlist.
+
+A client's ID comes from the namespace and service account its pod runs as:
+
+```
+spiffe://cluster.local/ns/<namespace>/sa/<service-account>
+```
+
+The trust domain `cluster.local` is fixed by Substrate's pod identity signer, so an ID
+is known before the install. Clients are the workloads that send requests to actors,
+usually your application's frontend or backend service. `kubectl ate` talks to the API
+server, not the router, and needs no entry; neither do Substrate's own components.
+
+The installer sets the allowlist when it turns Substrate on (step 6):
+
+- It always lists the counter demos' driver pods,
+  `spiffe://cluster.local/ns/ate-demo-counter/sa/default` and
+  `spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default`. Both are listed
+  because the sandbox runtime and demo are chosen after step 6. This lets any pod
+  running as the default service account in those two namespaces reach any actor.
+- It appends whatever you export in `ATE_INGRESS_ALLOWED_SPIFFE_IDS`
+  (comma-separated) before starting the installer, for your own clients:
+
+  ```bash
+  export ATE_INGRESS_ALLOWED_SPIFFE_IDS=spiffe://cluster.local/ns/shop/sa/frontend
+  make run
+  ```
+
+To add a client after the install, redeploy the router with the full list. Each deploy
+replaces the list rather than adding to it. From the substrate checkout, with the
+cluster's environment set (the installer's upgrade hand-over prints it):
+
+```bash
+go run ./cmd/ate-setup deploy atenet \
+  --credential-provider='{"name":"k8s.io"}' \
+  --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-demo-counter/sa/default,spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default,spiffe://cluster.local/ns/shop/sa/frontend
+```
+
+A client in the cluster mounts its certificate with a `podCertificate` projected
+volume and the router's serving CA with a `clusterTrustBundle` one; upstream's
+[router README](https://github.com/agent-substrate/substrate/blob/main/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization)
+shows both.
+
+The demo's next steps follow the router. A Substrate tree whose counter demo has a
+driver pod ([agent-substrate/substrate#3178](https://github.com/agent-substrate/substrate/pull/3178))
+reads its logs, `kubectl logs -n ate-demo-counter -l app=counter-driver -f`, which show
+it calling the actor through the router. v0.6.0 has no driver, so the tour stops at
+creating the actor.
+
+`ATE_ATENET_DATAPLANE=agentgateway` selects the agentgateway router instead. It needs
+no allowlist and serves plain HTTP on port 80, so the next steps port-forward it and
+`curl` the actor, but it does not authenticate clients.
 
 ## Where the images come from
 

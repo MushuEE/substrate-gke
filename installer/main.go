@@ -245,10 +245,15 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// install leaves a written copy behind.
 	if st.DemoDeployed {
 		section("Next steps — try the " + ui.DemoName(st) + " demo")
-		portForward, demo := b.NextSteps(st)
-		command(portForward)
+		lead, demo := b.NextSteps(st)
+		if lead != "" {
+			command(lead)
+		}
 		for _, cmd := range demo {
 			command(cmd)
+		}
+		if routerNote := b.RouterNote(); routerNote != "" {
+			note(routerNote)
 		}
 	}
 }
