@@ -234,9 +234,9 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	resources := "snapshot and asset buckets, IAM bindings, and dashboards"
+	resources := "snapshot and asset buckets, snapshot transfer service account, IAM bindings, and dashboards"
 	if st.CreatesArtifactRepository() {
-		resources = "snapshot and asset buckets, IAM bindings, dashboards, and the image repository"
+		resources = "snapshot and asset buckets, snapshot transfer service account, IAM bindings, dashboards, and the image repository"
 	}
 	note("Delete everything this install created in GCP — the cluster, the", resources+":")
 	command(b.CleanupCommand(st))

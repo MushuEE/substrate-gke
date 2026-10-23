@@ -25,7 +25,7 @@ import (
 var bootstrapCmd = &cobra.Command{
 	Use:   "bootstrap",
 	Short: "Fully bootstrap the GCP environment",
-	Long:  `Enables APIs, creates the cluster and the snapshot and asset buckets, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
+	Long:  `Enables APIs, creates the cluster, the snapshot and asset buckets, and the snapshot transfer service account, grants IAM permissions, and creates dashboards. Use --create-repository to also create an image repository for source builds.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		warnDeprecatedMachineTypeEnv(cmd)
@@ -45,7 +45,7 @@ var bootstrapCmd = &cobra.Command{
 		}
 
 		slog.Info("Starting full bootstrap...")
-		total := 7
+		total := 8
 		if cfg.CreateArtifactRepository {
 			total++
 		}
@@ -87,6 +87,11 @@ var bootstrapCmd = &cobra.Command{
 			return err
 		}
 
+		logStep("Creating the snapshot transfer service account...")
+		if err := setupTransferServiceAccount(ctx, &cfg, workloadIdentityPrincipal(&cfg, "ate-api-server")); err != nil {
+			return err
+		}
+
 		logStep("Creating IAM policy bindings for the buckets...")
 		if err := createIamPolicyBindings(ctx, &cfg); err != nil {
 			return err
@@ -119,6 +124,7 @@ func init() {
 	bootstrapCmd.Flags().Int64Var(&cfg.BootDiskProvisionedThroughputMBps, "boot-disk-provisioned-throughput", getEnv("BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS", int64(0)), "Provisioned throughput in MiB/s for the node pool boot disk (hyperdisk-balanced only; set together with --boot-disk-provisioned-iops; 0 = GKE default) [env: BOOT_DISK_PROVISIONED_THROUGHPUT_MBPS]")
 	bootstrapCmd.Flags().StringVar(&cfg.BucketName, "bucket-name", getEnv("BUCKET_NAME", ""), "Name of the GCS bucket for snapshots. The micro-VM asset bucket is named BUCKET_NAME-assets [env: BUCKET_NAME]")
 	addAteletSnapshotAccessFlag(bootstrapCmd)
+	addTransferGSANameFlag(bootstrapCmd)
 	bootstrapCmd.Flags().BoolVar(&cfg.CreateArtifactRepository, "create-repository", getEnv("CREATE_ARTIFACT_REPOSITORY", false), "Create an Artifact Registry repository for source builds [env: CREATE_ARTIFACT_REPOSITORY]")
 	bootstrapCmd.Flags().StringVar(&cfg.ArtifactRegistryRepository, "repository-name", getEnv("ARTIFACT_REGISTRY_REPOSITORY", "ate-images"), "Name of the Artifact Registry Docker repository [env: ARTIFACT_REGISTRY_REPOSITORY]")
 	bootstrapCmd.Flags().StringVar(&cfg.DashboardDir, "dashboard-dir", getEnv("DASHBOARD_DIR", ""), "Directory containing dashboard JSON files; empty = the definitions built into this binary [env: DASHBOARD_DIR]")

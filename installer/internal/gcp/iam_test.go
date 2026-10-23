@@ -80,6 +80,7 @@ func TestMissingPermissionsReportsTheGap(t *testing.T) {
 	held := []string{
 		"serviceusage.services.enable",
 		"storage.buckets.create",
+		"iam.serviceAccounts.create",
 		"monitoring.dashboards.create",
 	}
 	srv := fakeCRM(t, held, "acme")

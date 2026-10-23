@@ -133,6 +133,7 @@ var notFoundRules = []rule{
 	{"container clusters list", "0", "", ""},
 	{"storage buckets describe", "1", "", bucketNotFound},
 	{"projects remove-iam-policy-binding", "1", "", bindingNotPresent},
+	{"iam service-accounts delete", "1", "", "ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Service account projects/acme/serviceAccounts/ate-snapshot-transfer@acme.iam.gserviceaccount.com does not exist."},
 }
 
 // Re-running after a partial teardown must still succeed: a resource that is
@@ -142,6 +143,9 @@ func TestTeardownToleratesAlreadyDeletedResources(t *testing.T) {
 	run := runTeardown(t, "", teardownEnv, notFoundRules, "--all")
 	if run.exitCode != 0 {
 		t.Errorf("teardown of already-deleted resources exited %d, want 0:\n%s", run.exitCode, run.output)
+	}
+	if !strings.Contains(run.calls, "iam service-accounts delete ate-snapshot-transfer@acme.iam.gserviceaccount.com") {
+		t.Errorf("--all did not delete the snapshot transfer service account; calls:\n%s", run.calls)
 	}
 }
 
@@ -186,6 +190,7 @@ func TestTeardownToleratesAnEmptyBucketWithoutBindings(t *testing.T) {
 	for _, want := range []string{
 		"storage buckets delete gs://acme-snapshots-assets",
 		"storage buckets remove-iam-policy-binding gs://acme-snapshots-assets",
+		"--member=serviceAccount:ate-snapshot-transfer@acme.iam.gserviceaccount.com",
 	} {
 		if !strings.Contains(run.calls, want) {
 			t.Errorf("teardown did not run %q for the asset bucket; calls:\n%s", want, run.calls)

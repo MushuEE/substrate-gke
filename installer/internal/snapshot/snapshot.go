@@ -88,6 +88,12 @@ const (
 	ReleaseVersion = "v0.4.0-gke.0"
 )
 
+// TransferGSAName is the snapshot transfer service account's name: what
+// setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given
+// as SNAPSHOT_TRANSFER_GSA_NAME. ate-setup has no default for it, and from
+// Substrate v0.6.0 refuses to deploy ate-api-server on GKE without it.
+const TransferGSAName = "ate-snapshot-transfer"
+
 // ShortCommit is Commit abbreviated for display.
 func ShortCommit() string { return shorten(Commit) }
 
@@ -559,6 +565,10 @@ func (b *Builder) env(st *state.Setup) []string {
 		"ENABLE_DATAPLANE_V2=" + strconv.FormatBool(dataplaneV2),
 		"NODE_MACHINE_TYPE=" + st.MachineType,
 		"BUCKET_NAME=" + st.BucketName,
+		// Bootstrap creates the account under this name and ate-setup hands
+		// it to ate-api-server's credential exchange, so both read it from
+		// here. Trees that predate the account ignore it.
+		"SNAPSHOT_TRANSFER_GSA_NAME=" + TransferGSAName,
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
 	}
@@ -735,6 +745,7 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 		"Creating GCS buckets for snapshots and micro-VM assets...",
 		"Granting GKE Node permissions...",
 		"Granting Atelet permissions...",
+		"Creating the snapshot transfer service account...",
 		"Creating IAM policy bindings for the buckets...",
 		"Creating Monitoring Dashboards...",
 	)

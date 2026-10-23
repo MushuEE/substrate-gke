@@ -252,6 +252,8 @@ func clusterExports(st *state.Setup) []string {
 		"export PROJECT_ID=" + ShellQuote(st.ProjectID),
 		"export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
 		"export CLUSTER_LOCATION=" + ShellQuote(st.Zone),
+		// Required by ate-setup from Substrate v0.6.0 on GKE, ignored before.
+		"export SNAPSHOT_TRANSFER_GSA_NAME=" + ShellQuote(TransferGSAName),
 	}
 }
 

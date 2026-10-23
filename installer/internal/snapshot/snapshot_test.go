@@ -1498,7 +1498,8 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
 		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
+		"export SNAPSHOT_TRANSFER_GSA_NAME=" + ShellQuote(TransferGSAName), "run . create iam --project-id " + ShellQuote(st.ProjectID)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
@@ -1507,8 +1508,9 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		t.Errorf("the rollback block should carry only what changes:\n%s", summary)
 	}
 	// Every indented line is meant to be pasted into a shell, the cd lines
-	// into the trees just fetched.
-	var script []string
+	// into the trees just fetched. go and gcloud are stubbed: the lines that
+	// call them act on a GCP project.
+	script := []string{"go() { :; }", "gcloud() { :; }"}
 	for _, line := range strings.Split(summary, "\n") {
 		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
 			script = append(script, strings.TrimSpace(line))
@@ -1622,11 +1624,11 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if !tc.prebuilt && (!slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) || !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.registry))) {
 				t.Errorf("build and upgrade must use %q", tc.registry)
 			}
-			steps := 7
+			steps := 8
 			if tc.create {
 				steps++
 			}
-			if slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
+			if slices.Contains(spec.SimLines, "Step 2/9: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
 			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
@@ -1716,6 +1718,13 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
 				}
 			}
+			// Every upgrade creates the snapshot transfer service account,
+			// under the new release's exports.
+			koRepo := st.BuildRepository()
+			if tc.prebuilt {
+				koRepo = ""
+			}
+			want += "go|" + next + "|-C " + b.SetupGCP + " run . create iam --project-id acme --bucket " + st.BucketName + "|" + koRepo + "\n"
 			if string(data) != want {
 				t.Fatalf("preparation calls = %q, want %q", data, want)
 			}

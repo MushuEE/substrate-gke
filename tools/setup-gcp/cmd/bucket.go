@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
@@ -101,18 +102,19 @@ func createBucket(ctx context.Context, cfg *Config, name string) error {
 	return nil
 }
 
-// bucketGrant is a role on a bucket for an ate-system Kubernetes service
-// account.
+// bucketGrant is a role on a bucket for an IAM member.
 type bucketGrant struct {
-	bucket  string
-	subject string
-	role    string
+	bucket string
+	member string
+	role   string
 }
 
 // bucketGrants are the roles setup-gcp grants on the two buckets.
 // ate-api-server copies snapshots for tags and deletes the ones nothing refers
-// to, so it gets objectAdmin, plus bucketViewer to resolve the bucket. atelet
-// reads micro-VM sandbox assets from the asset bucket with its own identity.
+// to, so it gets objectAdmin, plus bucketViewer to resolve the bucket. The
+// transfer service account gets the same: the credential exchange downscopes
+// its token to each actor's prefixes for every snapshot transfer. atelet reads
+// micro-VM sandbox assets from the asset bucket with its own identity.
 //
 // With cfg.AteletSnapshotAccess, atelet also gets objectAdmin and
 // bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 move
@@ -120,15 +122,20 @@ type bucketGrant struct {
 // every snapshot transfer on a per-actor token from the credential exchange
 // and do not.
 func bucketGrants(cfg *Config) []bucketGrant {
+	apiServer := workloadIdentityPrincipal(cfg, "ate-api-server")
+	transfer := transferServiceAccountMember(cfg)
+	atelet := workloadIdentityPrincipal(cfg, "atelet")
 	grants := []bucketGrant{
-		{bucket: cfg.BucketName, subject: "ate-api-server", role: "roles/storage.objectAdmin"},
-		{bucket: cfg.BucketName, subject: "ate-api-server", role: "roles/storage.bucketViewer"},
-		{bucket: cfg.assetBucketName(), subject: "atelet", role: "roles/storage.objectViewer"},
+		{bucket: cfg.BucketName, member: apiServer, role: "roles/storage.objectAdmin"},
+		{bucket: cfg.BucketName, member: apiServer, role: "roles/storage.bucketViewer"},
+		{bucket: cfg.BucketName, member: transfer, role: "roles/storage.objectAdmin"},
+		{bucket: cfg.BucketName, member: transfer, role: "roles/storage.bucketViewer"},
+		{bucket: cfg.assetBucketName(), member: atelet, role: "roles/storage.objectViewer"},
 	}
 	if cfg.AteletSnapshotAccess {
 		grants = append(grants,
-			bucketGrant{bucket: cfg.BucketName, subject: "atelet", role: "roles/storage.objectAdmin"},
-			bucketGrant{bucket: cfg.BucketName, subject: "atelet", role: "roles/storage.bucketViewer"},
+			bucketGrant{bucket: cfg.BucketName, member: atelet, role: "roles/storage.objectAdmin"},
+			bucketGrant{bucket: cfg.BucketName, member: atelet, role: "roles/storage.bucketViewer"},
 		)
 	}
 	return grants
@@ -160,13 +167,34 @@ func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
 
 	grants := bucketGrants(cfg)
 	for i, name := range names {
-		if !addGrants(policies[i], cfg, name, grants) {
-			slog.Info("IAM policy is already correct", slog.String("bucket", name))
-			continue
-		}
-		slog.Info("Setting IAM policy for bucket", slog.String("bucket", name))
-		if err := client.Bucket(name).IAM().V3().SetPolicy(ctx, policies[i]); err != nil {
-			return fmt.Errorf("set bucket %s iam policy: %w", name, err)
+		handle := client.Bucket(name).IAM().V3()
+		policy := policies[i]
+		// A service account created moments earlier can take a while to
+		// propagate, and granting to it too soon fails with "does not
+		// exist". The policy is re-read on each attempt, so an etag conflict
+		// also resolves.
+		for attempt := 1; ; attempt++ {
+			if !addGrants(policy, name, grants) {
+				slog.Info("IAM policy is already correct", slog.String("bucket", name))
+				break
+			}
+			slog.Info("Setting IAM policy for bucket", slog.String("bucket", name))
+			err := handle.SetPolicy(ctx, policy)
+			if err == nil {
+				break
+			}
+			if attempt >= 6 {
+				return fmt.Errorf("set bucket %s iam policy: %w", name, err)
+			}
+			slog.Warn("Setting bucket IAM policy failed, retrying...", slog.String("bucket", name), slog.Int("attempt", attempt), slog.Any("err", err))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(transferRetryDelay):
+			}
+			if policy, err = handle.Policy(ctx); err != nil {
+				return fmt.Errorf("get bucket %s iam policy: %w", name, err)
+			}
 		}
 	}
 	return nil
@@ -174,17 +202,16 @@ func createIamPolicyBindings(ctx context.Context, cfg *Config) error {
 
 // addGrants adds the grants on the named bucket that policy lacks, and
 // reports whether it added any.
-func addGrants(policy *iam.Policy3, cfg *Config, name string, grants []bucketGrant) bool {
+func addGrants(policy *iam.Policy3, name string, grants []bucketGrant) bool {
 	changed := false
 	for _, g := range grants {
 		if g.bucket != name {
 			continue
 		}
-		member := fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/%s", cfg.ProjectNumber, cfg.ProjectID, g.subject)
-		if !addBinding(&policy.Bindings, g.role, member) {
+		if !addBinding(&policy.Bindings, g.role, g.member) {
 			continue
 		}
-		slog.Info("Adding role to member", slog.String("bucket", name), slog.String("role", g.role), slog.String("member", member))
+		slog.Info("Adding role to member", slog.String("bucket", name), slog.String("role", g.role), slog.String("member", g.member))
 		changed = true
 	}
 	return changed

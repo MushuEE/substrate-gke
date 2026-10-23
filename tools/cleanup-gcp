@@ -16,8 +16,9 @@
 
 # cleanup-gcp deletes the GCP resources the installer's provision step
 # (`setup-gcp bootstrap`) creates: monitoring dashboards, IAM bindings, the
-# snapshot and micro-VM asset buckets, and the GKE cluster. Image repositories
-# are kept unless --delete-repository is given.
+# snapshot transfer service account, the snapshot and micro-VM asset buckets,
+# and the GKE cluster. Image repositories are kept unless --delete-repository
+# is given.
 #
 # It is a thin wrapper: the deletions themselves live in
 # tools/setup-gcp/teardown.sh, next to the bootstrap they reverse, so a new
@@ -50,7 +51,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage: tools/cleanup-gcp --project ID --cluster NAME --location LOCATION --bucket NAME [options]
 
-Deletes the GKE cluster, snapshot and asset buckets, IAM bindings, and monitoring dashboards.
+Deletes the GKE cluster, snapshot and asset buckets, snapshot transfer service account,
+IAM bindings, and monitoring dashboards.
 Image repositories are kept unless --delete-repository is given.
 
 Options:
@@ -119,6 +121,7 @@ cat <<EOF
 About to delete from project ${PROJECT_ID}:
   - the Substrate monitoring dashboards
   - the setup-gcp IAM bindings (project and bucket level)
+  - the snapshot transfer service account
   - gs://${BUCKET_NAME} and every snapshot in it
   - gs://${BUCKET_NAME}-assets and the micro-VM assets in it
   - GKE cluster ${CLUSTER_NAME} in ${CLUSTER_LOCATION}
