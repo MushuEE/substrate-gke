@@ -46,13 +46,14 @@ func containsAny(subs ...string) func(string) bool {
 }
 
 // Bootstrap tracks the idempotent phases of `setup-gcp bootstrap`,
-// preceded by the pinned substrate fetch this step pays for on a cold cache.
+// preceded by the substrate fetch this step pays for on a cold cache.
+// fetchLabel names that fetch; see snapshot.Builder.FetchLabel.
 //
 // The cluster phase is the one whose work depends on the cluster, so its label
 // does too. setup-gcp logs "Creating GKE Cluster" either way, but on an
 // existing cluster it creates nothing: it either checks the cluster, or turns
 // the beta APIs on in a control-plane update the user was just told to expect.
-func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistItem {
+func Bootstrap(fetchLabel string, artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistItem {
 	clusterStep := "Check the existing GKE cluster"
 	switch {
 	case clusterIsNew:
@@ -61,7 +62,7 @@ func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistI
 		clusterStep = "Turn on the beta PodCertificate APIs (control-plane update)"
 	}
 	items := []ChecklistItem{
-		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Enabling required APIs")},
 	}
 	if artifactRegistry {
@@ -108,15 +109,16 @@ func FilestoreCSI() []ChecklistItem {
 }
 
 // MicroVMDeps tracks the three phases of `install-microvm-deps.sh --install`,
-// preceded by the same pinned fetch the other in-tree steps pay for.
+// preceded by the same fetch the other in-tree steps pay for, named by
+// fetchLabel.
 //
 // The assemble row matches either outcome: a first run builds the asset set,
 // and a later one finds it already in bin/microvm-assets and skips. Both mean
 // the phase is done, and leaving the row unlit on the fast path would read as
 // a stall on the step's slowest phase.
-func MicroVMDeps() []ChecklistItem {
+func MicroVMDeps(fetchLabel string) []ChecklistItem {
 	return []ChecklistItem{
-		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Assemble the micro-VM asset set", containsAny("Assembling micro-VM assets", "Assets already present", "re-assembling")},
 		{"Upload assets to GCS (kata-assets/)", contains("Uploading assets to gs://")},
 		{"Apply the cluster-wide microvm SandboxConfig", contains("Applying microvm SandboxConfig")},

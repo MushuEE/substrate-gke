@@ -1971,7 +1971,7 @@ func TestDryRunShowsGuardStates(t *testing.T) {
 	poc := testApp(t)
 	press = pressToCluster(t, poc)
 	press("4", "enter") // substrate-ga, ready, managed Filestore driver on
-	if poc.mach.Current() != state.Provision || strings.Contains(poc.cur.View(120), "Filestore") {
+	if poc.mach.Current() != state.Provision || strings.Contains(flat(poc.cur.View(120)), "managed Filestore") {
 		t.Errorf("substrate-ga: step=%v, want Provision without a Filestore warning:\n%s", poc.mach.Current(), poc.cur.View(120))
 	}
 }
@@ -2038,7 +2038,7 @@ func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
 	st := deps.Setup
 	st.ProjectID, st.ClusterName, st.ClusterIsNew, st.ClusterFilestoreAddon = "acme", "prod", false, true
 
-	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
+	if view := newProvisionScreen(deps).View(120); strings.Contains(flat(view), "managed Filestore") {
 		t.Errorf("provision should not mention the managed Filestore driver:\n%s", view)
 	}
 	if view := flat(newFilestoreScreen(deps).View(120)); !strings.Contains(view, "Installing turns it off first") || !strings.Contains(view, "keep GKE's managed Filestore CSI driver") {
@@ -2046,7 +2046,7 @@ func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
 	}
 
 	st.ClusterIsNew = true
-	if view := newProvisionScreen(deps).View(120); strings.Contains(view, "Filestore") {
+	if view := newProvisionScreen(deps).View(120); strings.Contains(flat(view), "managed Filestore") {
 		t.Errorf("a new cluster should get no Filestore warning:\n%s", view)
 	}
 	if view := flat(newFilestoreScreen(deps).View(120)); strings.Contains(view, "is on for this cluster") {
@@ -3552,5 +3552,17 @@ func TestProvisionCanGoBackDuringDockerCheck(t *testing.T) {
 				t.Fatal("old check result changed the new screen")
 			}
 		})
+	}
+}
+
+// A run the images step moved to another commit fetches that commit, and the
+// provision checklist says so rather than naming the pinned checkout.
+func TestProvisionChecklistNamesTheSelectedCommit(t *testing.T) {
+	app := testApp(t)
+	app.deps.Builder = snapshot.NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	app.deps.Builder.UseSource(snapshot.Revision{Repo: snapshot.RepoURL, Commit: strings.Repeat("c", 40)})
+	provision := newProvisionScreen(app.deps)
+	if got := provision.comp.items[0].Label; got != "Fetch the selected substrate checkout (cccccccccccc)" {
+		t.Errorf("provision fetch row = %q", got)
 	}
 }

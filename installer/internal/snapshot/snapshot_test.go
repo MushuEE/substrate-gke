@@ -1731,3 +1731,27 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 		})
 	}
 }
+
+// The fetch row names the revision the run uses: the pin, a commit the images
+// step chose instead, or a tree the user supplied, which is not fetched.
+func TestFetchLabelNamesTheRevision(t *testing.T) {
+	pinned := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if got, want := pinned.FetchLabel(), "Fetch the pinned substrate checkout ("+ShortCommit()+")"; got != want {
+		t.Errorf("pinned: %q, want %q", got, want)
+	}
+	selected := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	selected.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("b", 40)})
+	if got, want := selected.FetchLabel(), "Fetch the selected substrate checkout (bbbbbbbbbbbb)"; got != want {
+		t.Errorf("selected commit: %q, want %q", got, want)
+	}
+	fork := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	fork.UseSource(Revision{Repo: "https://github.com/someone/substrate.git", Commit: Commit})
+	if got := fork.FetchLabel(); !strings.HasPrefix(got, "Fetch the selected substrate checkout") {
+		t.Errorf("the pinned commit from another repository: %q, want the selected label", got)
+	}
+	root := t.TempDir()
+	local := NewBuilder(root, false)
+	if got, want := local.FetchLabel(), "Use the substrate checkout at "+root; got != want {
+		t.Errorf("local tree: %q, want %q", got, want)
+	}
+}

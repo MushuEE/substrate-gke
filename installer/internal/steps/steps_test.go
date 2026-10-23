@@ -31,10 +31,14 @@ func feed(items []ChecklistItem, lines []string) int {
 	return active
 }
 
+// fetchLabel stands in for snapshot.Builder.FetchLabel, which the checklists
+// take as given.
+const fetchLabel = "Fetch the substrate checkout"
+
 func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 	for _, ar := range []bool{false, true} {
 		t.Run(fmt.Sprintf("artifact-registry=%t", ar), func(t *testing.T) {
-			items := Bootstrap(ar, true, false)
+			items := Bootstrap(fetchLabel, ar, true, false)
 			phases := []string{"Enabling required APIs"}
 			if ar {
 				phases = append(phases, "Creating Artifact Registry repository")
@@ -63,7 +67,7 @@ func TestBootstrapChecklistTracksSetupGCPOutput(t *testing.T) {
 
 // A warm cache prints a different line; it must still light up the fetch item.
 func TestBootstrapChecklistTracksACachedCheckout(t *testing.T) {
-	if got := feed(Bootstrap(false, true, false), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
+	if got := feed(Bootstrap(fetchLabel, false, true, false), []string{snapshot.CachedLine + snapshot.ShortCommit()}); got != 0 {
 		t.Fatalf("active = %d, want 0 (fetch step)", got)
 	}
 }
@@ -121,7 +125,7 @@ func TestFilestoreCSIChecklistTracksDeployOutput(t *testing.T) {
 }
 
 func TestMicroVMDepsChecklistTracksInstallOutput(t *testing.T) {
-	items := MicroVMDeps()
+	items := MicroVMDeps(fetchLabel)
 	lines := []string{
 		snapshot.FetchLine + "@" + snapshot.ShortCommit() + " from https://github.com/agent-substrate/substrate.git...",
 		"[install-microvm-deps]: Assembling micro-VM assets into bin/microvm-assets/amd64 (ARCH=amd64)...",
@@ -139,7 +143,7 @@ func TestMicroVMDepsChecklistTracksInstallOutput(t *testing.T) {
 // assembling. The row has to light either way: it is the step's slowest phase,
 // and an unlit row on the fast path reads as a stall.
 func TestMicroVMDepsChecklistTracksCachedAssets(t *testing.T) {
-	items := MicroVMDeps()
+	items := MicroVMDeps(fetchLabel)
 	lines := []string{
 		snapshot.CachedLine + snapshot.ShortCommit(),
 		"[install-microvm-deps]: Assets already present in bin/microvm-assets/amd64; skipping assemble.",
@@ -182,7 +186,7 @@ func TestBootstrapLabelsTheClusterStepForTheSituation(t *testing.T) {
 		{"existing, missing the beta APIs", false, true, "Turn on the beta PodCertificate APIs"},
 		{"existing and ready", false, false, "Check the existing GKE cluster"},
 	} {
-		if got := Bootstrap(false, tc.isNew, tc.enableBetas)[2].Label; !strings.HasPrefix(got, tc.want) {
+		if got := Bootstrap(fetchLabel, false, tc.isNew, tc.enableBetas)[2].Label; !strings.HasPrefix(got, tc.want) {
 			t.Errorf("%s: step 2 = %q, want it to start %q", tc.name, got, tc.want)
 		}
 	}

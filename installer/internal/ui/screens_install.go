@@ -50,7 +50,7 @@ type provisionDockerMsg struct {
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Setup.CreatesArtifactRepository(), deps.Setup.ClusterIsNew, deps.Setup.EnableBetaAPIs), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.FetchLabel(), deps.Setup.CreatesArtifactRepository(), deps.Setup.ClusterIsNew, deps.Setup.EnableBetaAPIs), deps.LogPath),
 	}
 }
 
@@ -430,7 +430,7 @@ func (s *sandboxScreen) Hints() []Hint {
 func (s *sandboxScreen) startMicroVMStage() tea.Cmd {
 	s.confirmingNoKVM = false
 	s.deps.Setup.SandboxClass = state.SandboxMicroVM
-	s.comp = newExecComp(s.deps.Runner, s.deps.Builder.InstallMicroVMDeps(s.deps.Setup), steps.MicroVMDeps(), s.deps.LogPath)
+	s.comp = newExecComp(s.deps.Runner, s.deps.Builder.InstallMicroVMDeps(s.deps.Setup), steps.MicroVMDeps(s.deps.Builder.FetchLabel()), s.deps.LogPath)
 	return s.comp.start()
 }
 

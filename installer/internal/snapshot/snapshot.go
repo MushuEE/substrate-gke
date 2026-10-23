@@ -468,6 +468,21 @@ func (b *Builder) UseSource(rev Revision) {
 	}
 }
 
+// FetchLabel is the checklist label for the fetch preamble of the in-tree
+// steps. It names the revision the run uses, so a run the images step moved
+// off the pin does not claim to fetch the pinned checkout. A tree the user
+// supplied is used as it is, with nothing fetched.
+func (b *Builder) FetchLabel() string {
+	switch {
+	case !b.Managed:
+		return "Use the substrate checkout at " + b.Root
+	case b.repo == RepoURL && b.commit == Commit:
+		return "Fetch the pinned substrate checkout (" + shorten(b.commit) + ")"
+	default:
+		return "Fetch the selected substrate checkout (" + shorten(b.commit) + ")"
+	}
+}
+
 // CleanupCommand preserves the cluster and repository targets used by this install.
 func (b *Builder) CleanupCommand(st *state.Setup) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
