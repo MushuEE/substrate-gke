@@ -24,73 +24,72 @@ import (
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-// A build from source names its images ateapi-<md5>, a published release
-// ateapi:<tag>; the probe has to tell the two apart and recover the registry
-// (and tag) ate-setup needs, then render a shell block that sources.
-func TestParseProbeReadsSourceAndPrebuiltInstalls(t *testing.T) {
-	st := testSetup(t)
-	src, err := ParseProbe([]string{
-		"Fetching cluster endpoint and auth data.",
-		versionsMarker + "substrate-5f0ef402d9c4",
-		imageMarker + "gcr.io/acme/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
-	})
-	if err != nil {
-		t.Fatalf("ParseProbe(source): %v", err)
-	}
-	if src.Prebuilt() || src.KoDockerRepo != "gcr.io/acme/ate-images" || len(src.Running) != 1 {
-		t.Errorf("source probe = %+v", src)
-	}
-	script := src.Exports(st, src.Running[0]) + `; printf '%s|%s|%s' "$KO_DOCKER_REPO" "$VERSION" "$CLUSTER_NAME"`
-	out, err := exec.Command("bash", "-c", script).Output()
-	if err != nil || string(out) != "gcr.io/acme/ate-images|substrate-5f0ef402d9c4|"+st.ClusterName {
-		t.Errorf("source exports gave %q, %v", out, err)
-	}
-
-	pre, err := ParseProbe([]string{
-		versionsMarker + "v0.1.0 v0.1.1 ",
-		imageMarker + testImageRepo + "/ateapi:v0.1.1@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42",
-	})
-	if err != nil {
-		t.Fatalf("ParseProbe(prebuilt): %v", err)
-	}
-	if !pre.Prebuilt() || pre.ImageRepo != testImageRepo || pre.ImageTag != "v0.1.1" || len(pre.Running) != 2 {
-		t.Errorf("prebuilt probe = %+v", pre)
-	}
-	if exports := pre.Exports(st, "v0.1.1"); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.1'") || strings.Contains(exports, "export KO_DOCKER_REPO") {
-		t.Errorf("prebuilt exports:\n%s", exports)
-	}
-	got := state.NewSetup()
-	src.Apply(got, "substrate-5f0ef402d9c4")
-	if got.InstalledVersion != "substrate-5f0ef402d9c4" || got.KoDockerRepo != "gcr.io/acme/ate-images" || got.InstalledRepo != RepoURL {
-		t.Errorf("Apply() = %+v", got)
-	}
-	// A registry read off one cluster must not survive a read of another.
-	pre.Apply(got, "v0.1.1")
-	if got.KoDockerRepo != "" {
-		t.Errorf("Apply(prebuilt) left KoDockerRepo = %q", got.KoDockerRepo)
-	}
-	if got.InstalledCommit != "" {
-		t.Errorf("a read without the binary's report cannot know the commit, got %q", got.InstalledCommit)
-	}
-
-	for _, bad := range [][]string{
-		{imageMarker + "gcr.io/acme/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025"},
-		{versionsMarker + "v0.1.0"},
-		{versionsMarker + "v0.1.0", imageMarker + "gcr.io/acme/something-else:latest"},
-	} {
-		if _, err := ParseProbe(bad); err == nil {
-			t.Errorf("ParseProbe(%v) should fail", bad)
+// fakeKubectl puts a kubectl on PATH that answers the probes' queries for a
+// cluster that runs Substrate: the namespace, the atelet DaemonSet, and the
+// API server's --version. gcloud succeeds without touching anything.
+func fakeKubectl(t *testing.T, build string) []string {
+	t.Helper()
+	bin := t.TempDir()
+	kubectl := `#!/bin/sh
+case "$*" in
+  *"get namespace ate-system"*) echo ate-system ;;
+  *"get daemonset atelet"*) echo daemonset.apps/atelet ;;
+  *"--version"*) echo '` + build + `' ;;
+  *) echo "unexpected kubectl $*" >&2; exit 1 ;;
+esac
+`
+	for name, script := range map[string]string{"kubectl": kubectl, "gcloud": "#!/bin/sh\nexit 0\n"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
+	return append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// The version and commit come from the running binary, which ko stamps with
+// the version and Go with the vcs.revision of the tree it was built from. A
+// tree with an untracked file in it reports dirty, which does not change the
+// commit; a binary that was not built from a checkout reports none, and both
+// are then typed in.
+func TestParseProbeReadsTheRunningBinary(t *testing.T) {
+	const full = "5f0ef402d9c4dfab84bdf9ebef1ed762168f9c9c"
+	p := ParseProbe([]string{"Fetching cluster endpoint and auth data.",
+		buildMarker + "substrate-5f0ef402d9c4 commit=" + full + "-dirty built=2026-09-03T02:29:02Z linux/amd64"})
+	if p.Commit != full || p.Version != "substrate-5f0ef402d9c4" {
+		t.Fatalf("ParseProbe(dirty build) = %+v", p)
+	}
+	st := state.NewSetup()
+	p.Apply(st)
+	if st.InstalledCommit != full || st.InstalledVersion != "substrate-5f0ef402d9c4" {
+		t.Errorf("Apply recorded %q / %q", st.InstalledVersion, st.InstalledCommit)
+	}
+	if unknown := ParseProbe([]string{buildMarker + "v0.1.0 commit=unknown built=unknown linux/amd64"}); unknown != (Probe{}) {
+		t.Errorf("ParseProbe(unknown commit) = %+v; want nothing", unknown)
+	}
+	if blank := ParseProbe([]string{buildMarker}); blank != (Probe{}) {
+		t.Errorf("ParseProbe(no report) = %+v; want nothing", blank)
+	}
 	// The dry run replays a probe of the pin, commit included.
-	if p, err := ParseProbe(ProbeCluster(st, false).SimLines); err != nil || p.Running[0] != "substrate-"+ShortCommit() || p.Prebuilt() || p.Commit != Commit || p.KoDockerRepo != "us-west1-docker.pkg.dev/acme/ate-images" {
-		t.Errorf("dry-run probe = %+v, %v", p, err)
+	st = testSetup(t)
+	if p := ParseProbe(ProbeCluster(st, false).SimLines); p.Version != "substrate-"+ShortCommit() || p.Commit != Commit {
+		t.Errorf("dry-run probe = %+v", p)
 	}
 	for _, credentials := range []bool{true, false} {
 		spec := ProbeCluster(st, credentials)
 		if err := exec.Command("bash", "-n", "-c", spec.Argv[len(spec.Argv)-1]).Run(); err != nil {
 			t.Errorf("ProbeCluster(credentials=%v) is not valid shell: %v", credentials, err)
 		}
+	}
+	// End to end against a cluster that runs Substrate.
+	spec := ProbeCluster(st, false)
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = fakeKubectl(t, "v0.6.0 commit="+full+" built=2026-10-22T00:00:00Z linux/amd64")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("ProbeCluster: %v\n%s", err, out)
+	}
+	if p := ParseProbe(strings.Split(string(out), "\n")); p.Version != "v0.6.0" || p.Commit != full {
+		t.Errorf("ProbeCluster read %+v from:\n%s", p, out)
 	}
 }
 
@@ -109,8 +108,23 @@ func TestProbeClusterFailsWhenKubectlFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("the read should fail with kubectl:\n%s", out)
 	}
-	if !strings.Contains(string(out), "Unauthorized") || strings.Contains(string(out), versionsMarker) {
+	if !strings.Contains(string(out), "Unauthorized") || strings.Contains(string(out), buildMarker) {
 		t.Errorf("the read should show kubectl's error and no markers:\n%s", out)
+	}
+}
+
+// A cluster without an atelet DaemonSet runs no Substrate to upgrade.
+func TestProbeClusterFailsWithoutAtelet(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "kubectl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := ProbeCluster(testSetup(t), false)
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "no atelet DaemonSet") {
+		t.Errorf("the read should fail without atelet, got %v:\n%s", err, out)
 	}
 }
 
@@ -121,14 +135,20 @@ func TestCheckInstalled(t *testing.T) {
 		t.Fatalf("ParseInstalled(false) = %+v, %v; want Installed: false", probe, err)
 	}
 
-	// Installed with versions
-	probe, err = ParseInstalled([]string{installedMarker + "true substrate-71e7623 substrate-0b3d2d0"})
-	if err != nil || !probe.Installed || len(probe.Versions) != 2 || probe.Versions[0] != "substrate-71e7623" || probe.Versions[1] != "substrate-0b3d2d0" {
-		t.Fatalf("ParseInstalled(true with versions) = %+v, %v", probe, err)
+	// Installed, with the API server's report
+	probe, err = ParseInstalled([]string{installedMarker + "true atelet v0.6.0 commit=" + Commit + " built=2026-10-22T00:00:00Z linux/amd64"})
+	if err != nil || !probe.Installed || !probe.Atelet || probe.Partial() || probe.Version != "v0.6.0" {
+		t.Fatalf("ParseInstalled(true with atelet) = %+v, %v", probe, err)
 	}
 
-	// Installed without versions: an interrupted install, not a running one.
-	probe, err = ParseInstalled([]string{installedMarker + "true"})
+	// Installed, with an API server that could not say
+	probe, err = ParseInstalled([]string{installedMarker + "true atelet "})
+	if err != nil || !probe.Atelet || probe.Partial() || probe.Version != "" {
+		t.Fatalf("ParseInstalled(true with atelet, no report) = %+v, %v", probe, err)
+	}
+
+	// Installed without atelet: an interrupted install, not a running one.
+	probe, err = ParseInstalled([]string{installedMarker + "true  "})
 	if err != nil || !probe.Installed || !probe.Partial() {
 		t.Fatalf("ParseInstalled(true bare) = %+v, %v; want partial", probe, err)
 	}
@@ -143,7 +163,7 @@ func TestCheckInstalled(t *testing.T) {
 	if p, err := ParseInstalled(CheckInstalled("acme", "substrate-test", "us-west1-c").SimLines); err != nil || p.Installed {
 		t.Fatalf("dry-run check installed = %+v, %v; want not installed", p, err)
 	}
-	if p, err := ParseInstalled(CheckInstalled("acme", "substrate-installed", "us-west1-c").SimLines); err != nil || !p.Installed || p.Partial() {
+	if p, err := ParseInstalled(CheckInstalled("acme", "substrate-installed", "us-west1-c").SimLines); err != nil || !p.Installed || p.Partial() || p.Version == "" {
 		t.Fatalf("dry-run check of the installed fixture = %+v, %v; want installed with a version", p, err)
 	}
 	if p, err := ParseInstalled(CheckInstalled("acme", "substrate-partial", "us-west1-c").SimLines); err != nil || !p.Partial() {
@@ -157,12 +177,24 @@ func TestCheckInstalled(t *testing.T) {
 	}
 	// The probe must not rewrite the user's kubeconfig just for browsing
 	// clusters, and must not swallow a failing DaemonSet query into a
-	// bare-namespace answer.
+	// bare-namespace answer; only the best-effort version report may fail.
 	if !strings.Contains(script, `KUBECONFIG=$(mktemp)`) {
 		t.Errorf("probe does not isolate its kubeconfig:\n%s", script)
 	}
-	if strings.Contains(script, "|| true") {
+	if strings.Count(script, "|| true") != 1 || !strings.Contains(script, buildQuery) {
 		t.Errorf("probe swallows kubectl failures:\n%s", script)
+	}
+
+	// End to end: a running install carries no version label on atelet, and
+	// still reads as installed rather than partial.
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = fakeKubectl(t, "v0.6.0 commit="+Commit+" built=2026-10-22T00:00:00Z linux/amd64")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v\n%s", err, out)
+	}
+	if p, err := ParseInstalled(strings.Split(string(out), "\n")); err != nil || !p.Atelet || p.Partial() || p.Version != "v0.6.0" {
+		t.Errorf("CheckInstalled read %+v, %v from:\n%s", p, err, out)
 	}
 }
 
@@ -186,109 +218,5 @@ func TestCheckInstalledFailsWhenKubectlFails(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "Unauthorized") || strings.Contains(string(out), installedMarker) {
 		t.Errorf("CheckInstalled should show kubectl's error and no markers:\n%s", out)
-	}
-}
-
-// The probe reads one image, the API server's; the version it pairs with
-// is the one chosen, which mid-upgrade may be the other running one, and
-// which a digest-only reference does not name at all.
-func TestApplyPairsTheImageTagWithTheChosenVersion(t *testing.T) {
-	const digest = "@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
-	pre, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", imageMarker + testImageRepo + "/ateapi:v0.1.1" + digest})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, version := range []string{"v0.1.0", "v0.1.1"} {
-		st := state.NewSetup()
-		pre.Apply(st, version)
-		if st.InstalledImageRepo != testImageRepo || st.InstalledImageTag != version {
-			t.Errorf("Apply(%s) recorded %s:%s", version, st.InstalledImageRepo, st.InstalledImageTag)
-		}
-	}
-
-	pinned, err := ParseProbe([]string{versionsMarker + "v0.1.0", imageMarker + testImageRepo + "/ateapi" + digest})
-	if err != nil {
-		t.Fatalf("a digest-only reference should parse: %v", err)
-	}
-	if !pinned.Prebuilt() || pinned.ImageRepo != testImageRepo || pinned.ImageTag != "" {
-		t.Errorf("digest-only probe = %+v", pinned)
-	}
-	st := testSetup(t)
-	pinned.Apply(st, "v0.1.0")
-	if exports := InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG='v0.1.0'") || !strings.Contains(exports, "export ATE_IMAGE_REPO="+ShellQuote(testImageRepo)) {
-		t.Errorf("digest-only exports:\n%s", exports)
-	}
-}
-
-func TestExportsPreserveTheInstalledSourceRegistry(t *testing.T) {
-	st := testSetup(t)
-	st.KoDockerRepo = "europe-west4-docker.pkg.dev/acme/shared-images"
-	for name, exports := range map[string]string{
-		"probe":     Probe{KoDockerRepo: st.KoDockerRepo}.Exports(st, "substrate-0123456789ab"),
-		"installed": InstalledExports(st),
-	} {
-		if !strings.Contains(exports, "export KO_DOCKER_REPO="+ShellQuote(st.KoDockerRepo)) {
-			t.Errorf("%s exports:\n%s", name, exports)
-		}
-	}
-}
-
-// The commit comes from the running binary, which Go stamps with the
-// vcs.revision of the tree it was built from. A tree with an untracked file
-// in it reports dirty, which does not change the commit; a binary that was
-// not built from a checkout reports none, and the commit is then typed in.
-// With two versions running, the commit belongs to the version the binary
-// reports being.
-func TestParseProbeReadsTheCommitOffTheRunningBinary(t *testing.T) {
-	const full = "5f0ef402d9c4dfab84bdf9ebef1ed762168f9c9c"
-	image := imageMarker + "gcr.io/acme/ate-images/ateapi-752889f8b0bcdbee32172ac9fe056025@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
-
-	p, err := ParseProbe([]string{versionsMarker + "substrate-5f0ef402d9c4", image,
-		buildMarker + "substrate-5f0ef402d9c4 commit=" + full + "-dirty built=2026-09-03T02:29:02Z linux/amd64"})
-	if err != nil || p.Commit != full || p.BuildVersion != "substrate-5f0ef402d9c4" {
-		t.Fatalf("ParseProbe(dirty build) = %+v, %v", p, err)
-	}
-	st := state.NewSetup()
-	p.Apply(st, "substrate-5f0ef402d9c4")
-	if st.InstalledCommit != full {
-		t.Errorf("Apply should record the binary's commit, got %q", st.InstalledCommit)
-	}
-
-	unknown, err := ParseProbe([]string{versionsMarker + "v0.1.0", image, buildMarker + "v0.1.0 commit=unknown built=unknown linux/amd64"})
-	if err != nil || unknown.Commit != "" {
-		t.Errorf("ParseProbe(unknown commit) = %+v, %v; want no commit", unknown, err)
-	}
-
-	two, err := ParseProbe([]string{versionsMarker + "v0.1.0 v0.1.1", image,
-		buildMarker + "v0.1.1 commit=" + full + " built=2026-09-03T02:29:02Z linux/amd64"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for version, want := range map[string]string{"v0.1.1": full, "v0.1.0": ""} {
-		st := state.NewSetup()
-		two.Apply(st, version)
-		if st.InstalledCommit != want {
-			t.Errorf("Apply(%s) with the API server on v0.1.1 recorded commit %q, want %q", version, st.InstalledCommit, want)
-		}
-	}
-}
-
-// ate-setup installs pre-built images whenever ATE_IMAGE_REPO is set, and an
-// upgrade's blocks are pasted into one shell when it rolls back, so each block
-// has to unset the other family or a rollback would deploy the new images
-// under the old version.
-func TestExportsUnsetTheOtherImageFamily(t *testing.T) {
-	st := testSetup(t)
-	prebuilt := Probe{ImageRepo: testImageRepo, ImageTag: "v0.1.0"}.Exports(st, "v0.1.0")
-	source := Probe{KoDockerRepo: "gcr.io/acme/ate-images"}.Exports(st, "substrate-0123456789ab")
-	probe := `; printf '%s|%s|%s|%s' "${ATE_IMAGE_REPO:-unset}" "${ATE_IMAGE_TAG:-unset}" "${KO_DOCKER_REPO:-unset}" "$VERSION"`
-	for name, tc := range map[string]struct{ script, want string }{
-		"prebuilt then source": {prebuilt + "\n" + source, "unset|unset|gcr.io/acme/ate-images|substrate-0123456789ab"},
-		"source then prebuilt": {source + "\n" + prebuilt, testImageRepo + "|v0.1.0|unset|v0.1.0"},
-	} {
-		out, err := exec.Command("bash", "-euo", "pipefail", "-c", tc.script+probe).Output()
-		if err != nil || string(out) != tc.want {
-			t.Errorf("%s: shell saw %q (%v), want %q", name, out, err, tc.want)
-		}
 	}
 }

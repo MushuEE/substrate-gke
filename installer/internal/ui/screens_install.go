@@ -1131,7 +1131,7 @@ func (s *completeScreen) View(w int) string {
 	if st.Upgrade {
 		installedDir, nextDir := s.deps.Builder.UpgradeTrees(s.deps.UpgradeDir, st)
 		b.WriteString(theme.Good.Render("● UPGRADE PREPARED") + "\n\n")
-		b.WriteString(theme.Panel.Width(w-4).Render(s.deps.Builder.UpgradeSummary(st, installedDir, nextDir)) + "\n")
+		b.WriteString(handOver(s.deps, w, installedDir, nextDir))
 		return b.String()
 	}
 	b.WriteString(theme.Good.Render("● SUBSTRATE IS ON") + "\n\n")

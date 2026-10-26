@@ -15,23 +15,26 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-// RunbookURL is upstream's rolling upgrade runbook, which the upgrade track
-// prepares for and hands over to.
+// RunbookURL is upstream's upgrade runbook, which the upgrade track prepares
+// for and hands over to.
 const RunbookURL = "https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md"
 
 // DefaultUpgradeDir is where the upgrade track keeps the two source trees.
 // They live beside the install cache but outside the directories Cleanup
-// sweeps, because the runbook runs from them for as long as the upgrade
-// takes, rollback included.
+// sweeps, because the runbook runs from them, through the links the hand-over
+// makes, for as long as the upgrade takes, rollback included.
 func DefaultUpgradeDir() (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
@@ -80,14 +83,14 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 		)
 	}
 	// The installed commit was read off the cluster, not resolved against
-	// upstream like the new one; a fork or a private hotfix fails here.
-	notUpstream := fmt.Sprintf("Commit %s is not in %s: the installed Substrate was built from a fork or a private hotfix. Follow the runbook from a checkout of your own instead.", st.InstalledCommit, st.InstalledRepo)
+	// the repository like the new one; a fork or a private hotfix fails here.
+	notUpstream := fmt.Sprintf("Commit %s is not in %s: the installed Substrate was built from a fork or a private hotfix. Follow the runbook from a checkout of your own instead.", st.InstalledCommit, b.repo)
 	lines := []string{
 		"set -euo pipefail",
 		`trap 'rm -rf "${stage_installed:-}" "${stage_next:-}"' EXIT`,
 		`trap 'exit 130' INT TERM`,
 	}
-	lines = append(lines, fetch("stage_installed", installedDir, st.InstalledRepo, st.InstalledCommit, notUpstream)...)
+	lines = append(lines, fetch("stage_installed", installedDir, b.repo, st.InstalledCommit, notUpstream)...)
 	lines = append(lines, fetch("stage_next", nextDir, b.repo, b.commit, "")...)
 	return execx.Spec{
 		Label:   "fetch the installed and the new Substrate trees",
@@ -100,53 +103,161 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 	}
 }
 
-// NewExports is the environment for the runbook's ate-setup commands from
-// the new tree: the cluster, and the new version with where its images come
-// from.
-func (b *Builder) NewExports(st *state.Setup) string {
-	next := Probe{KoDockerRepo: st.BuildRepository()}
-	if st.Prebuilt() {
-		next = Probe{ImageRepo: st.ImageRepo, ImageTag: st.ImageTag}
+// RecordPath is the record ate-setup wrote of the cluster st names when it
+// deployed there: under ATE_RECORD_DIR, or by default the user cache
+// directory, one file per kube context. ate-setup fetched the credentials
+// itself, so the context is the one gcloud names.
+func RecordPath(st *state.Setup) (string, error) {
+	dir := os.Getenv("ATE_RECORD_DIR")
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot locate the cache directory ate-setup records installs in: %w", err)
+		}
+		dir = filepath.Join(base, "ate-setup")
 	}
-	return next.Exports(st, b.SubstrateVersion(st))
+	context := "gke_" + st.ProjectID + "_" + st.Zone + "_" + st.ClusterName
+	return filepath.Join(dir, "installs", context+".yaml"), nil
 }
 
-// UpgradeSummary is the hand-over, in the order the runbook reads: the
-// runbook, the variables its own commands use, then for its "Checkout and
-// environment" section the new tree and the ate-setup environment, and for
-// a rollback what changes in them.
+var releaseVersion = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$`)
+
+// CheckUpgrade reports whether the runbook supports moving from installed to
+// next. Per its table, patch releases of one minor can, and from 1.0 so can
+// the next minor. A version that is not a release, such as a build from
+// source, is only checked for being a different one.
+func CheckUpgrade(installed, next string) error {
+	if installed == next {
+		return errors.New("that is the version it runs")
+	}
+	from, to := releaseVersion.FindStringSubmatch(installed), releaseVersion.FindStringSubmatch(next)
+	if from == nil || to == nil {
+		return nil
+	}
+	n := func(m []string, i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	major, minor := n(from, 1), n(from, 2)
+	switch {
+	case n(to, 1) < major || n(to, 1) == major && (n(to, 2) < minor || n(to, 2) == minor && n(to, 3) < n(from, 3)):
+		return fmt.Errorf("%s is older than the installed %s; the runbook's rollback covers going back", next, installed)
+	case n(to, 1) != major:
+		return errors.New("a new major release needs a reinstall")
+	case major == 0 && n(to, 2) != minor:
+		return errors.New("before 1.0, a new minor release needs a reinstall")
+	case n(to, 2) > minor+1:
+		return fmt.Errorf("minor releases cannot be skipped; upgrade to v%d.%d first", major, minor+1)
+	}
+	return nil
+}
+
+// RecordPrebuilt reports whether the record at path installs pre-built
+// images: whether it has a repo under images, read line by line the way the
+// runbook's own commands read the record. ok is false when there is no
+// record to read.
+func RecordPrebuilt(path string) (prebuilt, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	inImages := false
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case line == "images:":
+			inImages = true
+		case !strings.HasPrefix(line, " "):
+			inImages = false
+		case inImages && strings.HasPrefix(strings.TrimSpace(line), "repo:"):
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "repo:")) != "", true
+		}
+	}
+	return false, true
+}
+
+// CheckImageSource reports whether the new version comes from the kind of
+// images the cluster's record installs. The runbook copies the record into
+// new.yaml and changes only its image tag, so it cannot move a cluster
+// between pre-built images and a build from source. Without a record there
+// is nothing to check yet.
+func CheckImageSource(st *state.Setup) error {
+	record, err := RecordPath(st)
+	if err != nil {
+		return nil
+	}
+	prebuilt, ok := RecordPrebuilt(record)
+	switch {
+	case !ok || prebuilt == st.Prebuilt():
+		return nil
+	case prebuilt:
+		return errors.New("its record installs pre-built images, and the runbook only moves them to another tag")
+	default:
+		return errors.New("its record installs a build from source, and the runbook builds the new release the same way")
+	}
+}
+
+// UpgradeCommands are the runbook's "Before you start" done for the cluster,
+// from the trees already fetched and ate-setup's record of the cluster,
+// plus the GKE preparation the runbook leaves out. They are pasted into one
+// shell once, and every runbook step runs from that shell. They carry no
+// comments: zsh, the macOS default, runs a pasted "#" line as a command.
+func (b *Builder) UpgradeCommands(st *state.Setup, installedDir, nextDir string) []string {
+	next := b.SubstrateVersion(st)
+	record, err := RecordPath(st)
+	if err != nil {
+		record = "<this cluster's ate-setup record>"
+	}
+	cmds := []string{
+		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s",
+			ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID)),
+		"mkdir ~/ate-upgrade && cd ~/ate-upgrade",
+		"cp " + ShellQuote(record) + " old.yaml",
+		"cp " + ShellQuote(record) + " new.yaml",
+	}
+	if st.Prebuilt() {
+		cmds = append(cmds, fmt.Sprintf(`sed -i.bak "s/^  tag: .*/  tag: %s/" new.yaml`, next))
+	}
+	cmds = append(cmds,
+		"ln -s "+ShellQuote(installedDir)+" old",
+		"ln -s "+ShellQuote(nextDir)+" new",
+		"(cd old && go install ./cmd/kubectl-ate)",
+		// Substrate v0.6.0 and later impersonate the snapshot transfer
+		// service account; creating it only adds bindings, so it is safe
+		// for an older release too. The upgrade track never asks for the
+		// bucket; the record names it.
+		fmt.Sprintf(`SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket "$(sed -n 's/^  bucketName: //p' old.yaml)"`,
+			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID)),
+		"cd new",
+	)
+	// A build from source takes its version from VERSION, which the record
+	// does not keep; pre-built images take it from the tag in the record,
+	// unless a VERSION left in the shell overrides it.
+	if st.Prebuilt() {
+		return append(cmds, "unset VERSION")
+	}
+	return append(cmds, "export VERSION="+ShellQuote(next))
+}
+
+// UpgradeNotes are what the commands cannot do by themselves: a record this
+// machine lacks, and the version a rollback from source runs as.
+func (b *Builder) UpgradeNotes(st *state.Setup) []string {
+	var notes []string
+	record, err := RecordPath(st)
+	if _, statErr := os.Stat(record); err != nil || statErr != nil {
+		notes = append(notes, fmt.Sprintf("This machine has no ate-setup record of the cluster at %s. Write one from the settings the cluster was installed with (upstream's docs/operator-install.md lists them) before running the commands.", record))
+	}
+	if !st.Prebuilt() {
+		notes = append(notes, fmt.Sprintf("A rollback runs from ~/ate-upgrade/old: export VERSION=%s there first.", ShellQuote(st.InstalledVersion)))
+	}
+	return notes
+}
+
+// UpgradeSummary is the hand-over printed when the installer exits: the
+// runbook, the commands, then the notes.
 func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) string {
-	var sb strings.Builder
-	block := func(heading string, lines ...string) {
-		sb.WriteString(heading + "\n")
-		for _, line := range lines {
-			sb.WriteString("  " + line + "\n")
-		}
-		sb.WriteString("\n")
+	lines := []string{"Run these commands once, then follow upstream's upgrade runbook from step 1:", "  " + RunbookURL, ""}
+	for _, cmd := range b.UpgradeCommands(st, installedDir, nextDir) {
+		lines = append(lines, "  "+cmd)
 	}
-	block("Run upstream's rolling upgrade runbook:", RunbookURL)
-	block("Variables the runbook uses. The rest of its Preflight table ($NODEPOOL, $NS,\n$OLD_WORKERPOOL, $NEW_WORKERPOOL, $NODE) is yours to fill in.",
-		"export CLUSTER="+ShellQuote(st.ClusterName),
-		"export ZONE="+ShellQuote(st.Zone),
-		"export OLD_VERSION="+ShellQuote(st.InstalledVersion),
-		"export NEW_VERSION="+ShellQuote(b.SubstrateVersion(st)))
-	block("When you reach its \"Checkout and environment\" section, check out the new release\nand set this for every ate-setup command of the upgrade:",
-		append([]string{"cd " + ShellQuote(nextDir)}, strings.Split(b.NewExports(st), "\n")...)...)
-	if st.CreatesArtifactRepository() {
-		commands := []string{
-			"gcloud services enable artifactregistry.googleapis.com --project " + ShellQuote(st.ProjectID),
-			fmt.Sprintf("go -C %s run . create repository --project-id %s --region %s --name %s",
-				ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.Region()), ShellQuote(st.RepositoryName())),
-		}
-		if b.BuildsWithDocker(st) {
-			commands = append(commands, "gcloud auth configure-docker "+ShellQuote(st.Region()+"-docker.pkg.dev"))
-		}
-		block("Before building images for this upgrade, prepare the default registry:", commands...)
+	for _, note := range b.UpgradeNotes(st) {
+		lines = append(lines, "", note)
 	}
-	block("Before deploying Substrate v0.6.0 or later, create the snapshot transfer service account\nits credential exchange impersonates, with its grants. It only adds bindings, so it is\nsafe to run for an older release:",
-		fmt.Sprintf("SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket %s",
-			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.BucketName)))
-	block("A rollback runs the same commands from the installed release, with its version:",
-		append([]string{"cd " + ShellQuote(installedDir)}, strings.Split(InstalledExports(st), "\n")...)...)
-	return strings.TrimRight(sb.String(), "\n")
+	return strings.Join(lines, "\n")
 }

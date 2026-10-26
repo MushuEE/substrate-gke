@@ -28,16 +28,14 @@ import (
 
 // ─── Choose the installed cluster ──────────────────────────────────────────
 
-// upgradeSourceScreen names the cluster to upgrade and reads what it runs
-// off the cluster itself: the version from the atelet DaemonSet, the images
-// and the commit from the running API server. It ends with the installed
-// tree and version known: the upgrade fetches that tree for rollback, and the
-// runbook reads that version as the old one. What the cluster cannot say is
+// upgradeSourceScreen names the cluster to upgrade and reads the version and
+// commit its API server reports. It ends with the installed tree and version
+// known: the upgrade fetches that tree for rollback, and a rollback from a
+// build from source runs as that version. What the cluster cannot say is
 // typed in.
 type upgradeSourceScreen struct {
 	deps *Deps
-	// mode: "target" (project, cluster, location), "reading", "choose"
-	// (several running versions), "manual".
+	// mode: "target" (project, cluster, location), "reading", "manual".
 	mode   string
 	fields []textinput.Model
 	labels []string
@@ -46,9 +44,6 @@ type upgradeSourceScreen struct {
 	// parsed marks the read's output as consumed: the component keeps
 	// reporting ok on later ticks, and the probe must be applied once.
 	parsed  bool
-	probe   snapshot.Probe
-	choices []string
-	cursor  int
 	errText string
 	note    string
 }
@@ -79,8 +74,6 @@ func (s *upgradeSourceScreen) Hints() []Hint {
 			return []Hint{{"r", "retry"}, {"m", "describe the installed Substrate by hand"}, {"b", "back"}}
 		}
 		return []Hint{{"esc", "cancel"}}
-	case "choose":
-		return []Hint{{"↑/↓", "choose"}, {"enter", "confirm"}, {"b", "back"}}
 	}
 	return []Hint{{"tab/↓", "next field"}, {"enter", "confirm"}, {"esc", "back"}}
 }
@@ -97,21 +90,14 @@ func (s *upgradeSourceScreen) enterTarget() tea.Cmd {
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
 
-// enterManual asks for the installed commit, version, and image registry.
+// enterManual asks for the installed commit and version.
 func (s *upgradeSourceScreen) enterManual() tea.Cmd {
 	st := s.deps.Setup
 	s.mode, s.focus, s.errText, s.comp = "manual", 0, "", nil
-	s.labels = []string{
-		"Installed Substrate commit (full SHA)",
-		"Installed version (the ate.dev/substrate-version node label)",
-		"Pre-built image registry (leave empty for source builds)",
-		"Source build registry (leave empty for pre-built images)",
-	}
+	s.labels = []string{"Installed Substrate commit (full SHA)", "Installed version"}
 	s.fields = []textinput.Model{
 		newInput(st.InstalledCommit, "40 hex characters"),
-		newInput(st.InstalledVersion, "kubectl get nodes -L ate.dev/substrate-version"),
-		newInput(st.InstalledImageRepo, "registry.example.com/substrate"),
-		newInput(st.KoDockerRepo, "<region>-docker.pkg.dev/<project>/ate-images"),
+		newInput(st.InstalledVersion, "v0.6.0"),
 	}
 	return tea.Batch(s.fields[0].Focus(), textinput.Blink)
 }
@@ -141,73 +127,40 @@ func (s *upgradeSourceScreen) submitTarget() tea.Cmd {
 	st := s.deps.Setup
 	st.ProjectID, st.ClusterName, st.Zone = project, cluster, zone
 	// Whatever an earlier read learned belonged to the cluster it named.
-	st.InstalledCommit, st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag, st.KoDockerRepo = "", "", "", "", ""
+	st.InstalledCommit, st.InstalledVersion = "", ""
 	s.mode, s.errText, s.fields, s.parsed = "reading", "", nil, false
 	s.comp = newExecComp(s.deps.Runner, snapshot.ProbeCluster(st, true), nil, s.deps.LogPath)
 	return s.comp.start()
 }
 
-// readDone parses what the read printed and moves on: straight to the
-// commit when the cluster runs one version, to a choice when it runs two.
+// readDone takes what the API server reported as the installed side, and
+// asks for it when the binary could not say.
 func (s *upgradeSourceScreen) readDone() tea.Cmd {
-	probe, err := snapshot.ParseProbe(s.comp.lines)
-	if err != nil {
-		s.comp.failed = err
-		return nil
-	}
-	s.probe = probe
-	if len(probe.Running) == 1 {
-		return s.use(probe.Running[0])
-	}
-	s.choices, s.cursor, s.mode = probe.Running, 0, "choose"
-	return nil
-}
-
-// use takes version as the installed one. The commit comes with it from the
-// running API server; when that binary runs the other version, or could not
-// say, the commit is typed in.
-func (s *upgradeSourceScreen) use(version string) tea.Cmd {
 	st := s.deps.Setup
-	s.probe.Apply(st, version)
+	snapshot.ParseProbe(s.comp.lines).Apply(st)
 	if st.InstalledCommit != "" {
 		return goNext
 	}
-	if s.probe.Commit != "" {
-		s.note = fmt.Sprintf("The API server runs %s, not %s; enter the commit %s was built from.", s.probe.BuildVersion, version, version)
-	} else {
-		s.note = fmt.Sprintf("The API server did not report the commit %s was built from; enter it here.", version)
-	}
+	s.note = "The API server did not report the version and commit it was built from; enter them here."
 	return s.enterManual()
 }
 
 func (s *upgradeSourceScreen) submitManual() tea.Cmd {
-	commit, version, registry := s.value(0), s.value(1), s.value(2)
-	sourceRegistry := s.value(3)
+	commit, version := s.value(0), s.value(1)
 	switch {
 	case !fullSHA.MatchString(strings.ToLower(commit)):
 		s.errText = "The installed commit has to be a full 40-character SHA. The running API server prints it: kubectl -n ate-system exec deploy/ate-api-server -- /ko-app/ateapi --version."
 		return s.setFocus(0)
 	case version == "":
-		s.errText = "The installed version is required; it is the ate.dev/substrate-version label on the nodes."
+		s.errText = "The installed version is required. The running API server prints it first for --version."
 		return s.setFocus(1)
-	case registry == "" && sourceRegistry == "":
-		s.errText = "Enter the pre-built image registry, or for a source build the registry its images were pushed to."
-		return s.setFocus(2)
-	case registry != "" && sourceRegistry != "":
-		s.errText = "Enter either a pre-built image registry or a source build registry."
-		return s.setFocus(3)
 	}
 	if err := snapshot.CheckImageTag(version); err != nil {
 		s.errText = err.Error()
 		return s.setFocus(1)
 	}
 	st := s.deps.Setup
-	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = snapshot.RepoURL, strings.ToLower(commit), version
-	st.InstalledImageRepo, st.InstalledImageTag = registry, ""
-	st.KoDockerRepo = sourceRegistry
-	if registry != "" {
-		st.InstalledImageTag = version
-	}
+	st.InstalledCommit, st.InstalledVersion = strings.ToLower(commit), version
 	return goNext
 }
 
@@ -250,18 +203,6 @@ func (s *upgradeSourceScreen) Update(msg tea.Msg) tea.Cmd {
 			return s.enterTarget()
 		}
 		return nil
-	case "choose":
-		switch key.String() {
-		case "up", "k":
-			s.cursor = max(s.cursor-1, 0)
-		case "down", "j":
-			s.cursor = min(s.cursor+1, len(s.choices)-1)
-		case "enter":
-			return s.use(s.choices[s.cursor])
-		case "b", "esc":
-			return s.enterTarget()
-		}
-		return nil
 	}
 	switch key.String() {
 	case "esc":
@@ -299,16 +240,6 @@ func (s *upgradeSourceScreen) View(w int) string {
 			b.WriteString("\n" + theme.Subtle.Render("Could not read the installed Substrate. Press [r] to retry, or [m] to describe it by hand."))
 		}
 		return b.String()
-	case "choose":
-		b.WriteString(theme.Subtle.Render("The cluster runs two versions, as it does mid-upgrade; pick the one to treat as installed.") + "\n\n")
-		for i, v := range s.choices {
-			if i == s.cursor {
-				b.WriteString(theme.Selected.Render(" "+v+" ") + "\n")
-			} else {
-				b.WriteString(theme.Subtle.Render("  "+v) + "\n")
-			}
-		}
-		return b.String()
 	}
 
 	for i, f := range s.fields {
@@ -326,9 +257,9 @@ func (s *upgradeSourceScreen) View(w int) string {
 	case s.mode == "manual" && s.note != "":
 		b.WriteString(theme.Warning.Render(s.note))
 	case s.mode == "manual":
-		b.WriteString(theme.Subtle.Render("The version is the ate.dev/substrate-version label on the nodes. The commit is\nwhat the running API server prints for --version, or what the images were\nbuilt from. Enter the pre-built image registry or, for source builds, the registry\nthe images were pushed to."))
+		b.WriteString(theme.Subtle.Render("The running API server prints both for --version: the version first, then the\ncommit the images were built from."))
 	default:
-		b.WriteString(theme.Subtle.Render("The installer reads the running version, images and commit off the cluster.\nCredentials are fetched with gcloud."))
+		b.WriteString(theme.Subtle.Render("The installer reads the running version and commit off the cluster's API server.\nCredentials are fetched with gcloud."))
 	}
 	return b.String()
 }
@@ -337,7 +268,7 @@ func (s *upgradeSourceScreen) View(w int) string {
 
 // upgradePlanScreen fetches the two trees the runbook runs from and hands
 // over: it changes nothing on the cluster. It refuses to prepare an upgrade
-// to the installed version, which the runbook cannot roll.
+// the runbook does not support.
 type upgradePlanScreen struct {
 	deps                  *Deps
 	comp                  *execComp
@@ -349,10 +280,13 @@ type upgradePlanScreen struct {
 func newUpgradePlanScreen(deps *Deps) *upgradePlanScreen {
 	s := &upgradePlanScreen{deps: deps}
 	st := deps.Setup
-	if v := deps.Builder.SubstrateVersion(st); v == st.InstalledVersion {
-		s.blocked = fmt.Sprintf("The new version is %s, the same as the installed one. The runbook needs them to differ, "+
-			"or its dataplane step rolls the running atelet in place instead of adding a second DaemonSet. "+
-			"Go back and choose another image tag or source revision.", v)
+	next := deps.Builder.SubstrateVersion(st)
+	err := snapshot.CheckUpgrade(st.InstalledVersion, next)
+	if err == nil {
+		err = snapshot.CheckImageSource(st)
+	}
+	if err != nil {
+		s.blocked = fmt.Sprintf("Cannot upgrade %s to %s in place: %v. Go back and choose other images, or reinstall.", st.InstalledVersion, next, err)
 		return s
 	}
 	s.installedDir, s.nextDir = deps.Builder.UpgradeTrees(deps.UpgradeDir, st)
@@ -430,11 +364,23 @@ func (s *upgradePlanScreen) View(w int) string {
 		"Fetching the installed tree and the new one for %s. Nothing on the cluster changes here.", st.ClusterName)) + "\n\n")
 	b.WriteString(s.comp.view(w))
 	if s.comp.ok() {
-		// Full width: a wrapped path is copied short. The same text is
-		// printed unwrapped once the installer exits.
-		b.WriteString("\n" + theme.AccentPanel.Width(w-4).Render(
-			s.deps.Builder.UpgradeSummary(st, s.installedDir, s.nextDir)) + "\n")
-		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish.") + theme.Subtle.Render("  The hand-over is printed again when the installer exits."))
+		b.WriteString("\n" + handOver(s.deps, w, s.installedDir, s.nextDir))
+		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish.") + theme.Subtle.Render("  The commands are printed again when the installer exits."))
+	}
+	return b.String()
+}
+
+// handOver renders the upgrade hand-over: the runbook as the next step, the
+// commands to paste in a panel of their own, at full width because a wrapped
+// path is copied short, and the notes under it.
+func handOver(deps *Deps, w int, installedDir, nextDir string) string {
+	st, builder := deps.Setup, deps.Builder
+	var b strings.Builder
+	b.WriteString(theme.Title.Render("Next: run these commands once, then follow the upgrade runbook from step 1") + "\n")
+	b.WriteString(theme.Accent.Render("  "+snapshot.RunbookURL) + "\n\n")
+	b.WriteString(theme.AccentPanel.Width(w-4).Render(strings.Join(builder.UpgradeCommands(st, installedDir, nextDir), "\n")) + "\n")
+	for _, note := range builder.UpgradeNotes(st) {
+		b.WriteString("\n" + theme.Warning.Width(w-4).Render(note) + "\n")
 	}
 	return b.String()
 }

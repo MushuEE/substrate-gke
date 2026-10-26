@@ -310,9 +310,10 @@ fi`)
 	}
 }
 
-// An upgrade's summary hands over to the runbook: the two versions with their
-// trees and the runbook itself, instead of an install recap.
+// An upgrade's summary hands over to the runbook: the trees linked into its
+// working directory and the runbook itself, instead of an install recap.
 func TestSummaryForAnUpgrade(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	st := state.NewSetup()
 	st.Upgrade = true
 	st.ProjectID, st.ClusterName = "acme", "prod"
@@ -322,7 +323,7 @@ func TestSummaryForAnUpgrade(t *testing.T) {
 	out := captureStdout(t, func() {
 		printSummary(&ui.App{Completed: true}, deps, false)
 	})
-	for _, want := range []string{"Upgrade prepared", snapshot.RunbookURL, "substrate-0123456789ab", "cd '/cache/upgrades/"} {
+	for _, want := range []string{"Upgrade prepared", snapshot.RunbookURL, "substrate-0123456789ab", "ln -s '/cache/upgrades/"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("upgrade summary is missing %q:\n%s", want, out)
 		}

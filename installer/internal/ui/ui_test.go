@@ -1444,10 +1444,11 @@ func typeText(t *testing.T, app *App, text string) {
 }
 
 // TestDryRunUpgradeEndToEnd walks the upgrade track: welcome (upgrade) →
-// doctor → the cluster named and its record read → images (the release) →
-// fetch (dry-run) → complete. Nothing in GCP is touched, and the new version
-// is the release the images step offers.
+// doctor → the cluster named and its API server read → images (the release)
+// → fetch (dry-run) → complete. Nothing in GCP is touched, and the new
+// version is the release the images step offers.
 func TestDryRunUpgradeEndToEnd(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
 	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
@@ -1467,14 +1468,13 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("after doctor: %v", app.mach.Current())
 	}
 	typeText(t, app, "acme")
-	press("enter", "enter", "enter") // cluster and location keep their defaults; the record is read
+	press("enter", "enter", "enter") // cluster and location keep their defaults; the API server is read
 	if app.mach.Current() != state.Images {
 		scr := app.cur.(*upgradeSourceScreen)
 		t.Fatalf("after the installed cluster: %v mode=%s err=%q", app.mach.Current(), scr.mode, scr.errText)
 	}
 	st := app.deps.Setup
-	want := "substrate-" + snapshot.ShortCommit()
-	if st.ProjectID != "acme" || st.InstalledCommit != snapshot.Commit || st.InstalledVersion != want || st.KoDockerRepo != "us-west1-docker.pkg.dev/acme/ate-images" {
+	if st.ProjectID != "acme" || st.InstalledCommit != snapshot.Commit || st.InstalledVersion != "substrate-"+snapshot.ShortCommit() {
 		t.Fatalf("installed cluster not read off the cluster: %+v", st)
 	}
 
@@ -1488,9 +1488,9 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 	}
 	plan := app.cur.(*upgradePlanScreen)
 	if !plan.comp.ok() {
-		t.Fatalf("dry-run fetch did not finish: failed=%v", plan.comp.failed)
+		t.Fatalf("dry-run fetch did not finish: failed=%v blocked=%q", plan.comp.failed, plan.blocked)
 	}
-	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "Checkout and environment") {
+	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "mkdir ~/ate-upgrade") {
 		t.Errorf("plan view lacks the hand-over:\n%s", view)
 	}
 	press("enter")
@@ -1540,114 +1540,42 @@ func TestUpgradeTrackFallsBackToDescribingTheCluster(t *testing.T) {
 	if scr.mode != "manual" {
 		t.Fatalf("m should describe by hand, mode=%s", scr.mode)
 	}
+	typeText(t, app, "0123456")
+	press("enter", "enter")
+	if app.mach.Current() != state.UpgradeSource || scr.focus != 0 || !strings.Contains(scr.errText, "40-character") {
+		t.Fatalf("a short commit was accepted: %v focus=%d error=%q", app.mach.Current(), scr.focus, scr.errText)
+	}
 	const installed = "0123456789abcdef0123456789abcdef01234567"
-	typeText(t, app, installed)
+	scr.fields[0].SetValue(installed)
 	press("enter")
 	typeText(t, app, "substrate-0123456789ab")
-	press("enter", "enter", "enter")
-	if app.mach.Current() != state.UpgradeSource || scr.errText == "" {
-		t.Fatal("a source install without its registry was accepted")
-	}
-	if scr.focus != 2 || !strings.Contains(scr.errText, "pre-built") || !strings.Contains(scr.errText, "source") {
-		t.Fatalf("missing registry: focus=%d, error=%q", scr.focus, scr.errText)
-	}
-	press("enter")
-	const registry = "europe-west4-docker.pkg.dev/acme/shared-images"
-	typeText(t, app, registry)
 	press("enter")
 	if app.mach.Current() != state.Images {
 		t.Fatalf("after describing the cluster: %v (%s)", app.mach.Current(), scr.errText)
 	}
 	st := app.deps.Setup
-	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" || st.InstalledImageRepo != "" {
+	if st.InstalledCommit != installed || st.InstalledVersion != "substrate-0123456789ab" {
 		t.Fatalf("described cluster not recorded: %+v", st)
 	}
-	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export KO_DOCKER_REPO="+snapshot.ShellQuote(registry)) {
-		t.Errorf("rollback must use the installed source registry:\n%s", exports)
-	}
 }
 
-// A pre-built cluster described by hand names its registry, so the rollback
-// environment carries the images it runs rather than a build. Leaving the
-// images step at the release it already runs is then refused: the runbook
-// cannot roll a version onto itself.
-func TestUpgradeTrackDescribedByHandAsPrebuiltRefusesTheSameVersion(t *testing.T) {
-	app := testApp(t)
-	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-	app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
-	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
-	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
-	press := func(keys ...string) {
-		for _, k := range keys {
-			pump(t, app, key(k))
-		}
-	}
-	press("3", "enter", "enter")
-	typeText(t, app, "acme")
-	press("enter", "enter", "enter", "m")
-	typeText(t, app, snapshot.Commit)
-	press("enter")
-	typeText(t, app, testImageTag)
-	press("enter")
-	typeText(t, app, "gcr.io/acme/mirror")
-	press("enter")
-	scr := app.cur.(*upgradeSourceScreen)
-	typeText(t, app, "gcr.io/acme/old-source")
-	press("enter")
-	if app.mach.Current() != state.UpgradeSource || scr.errText == "" {
-		t.Fatal("two installed registries were accepted")
-	}
-	scr.fields[3].SetValue("")
-	press("enter")
-	if app.mach.Current() != state.Images {
-		t.Fatalf("after describing the cluster: %v", app.mach.Current())
-	}
-	st := app.deps.Setup
-	if st.InstalledImageRepo != "gcr.io/acme/mirror" || st.InstalledImageTag != testImageTag || st.KoDockerRepo != "" {
-		t.Fatalf("pre-built install not recorded: %+v", st)
-	}
-	if exports := snapshot.InstalledExports(st); !strings.Contains(exports, "export ATE_IMAGE_TAG="+snapshot.ShellQuote(testImageTag)) || strings.Contains(exports, "export KO_DOCKER_REPO") {
-		t.Errorf("rollback exports for a pre-built install:\n%s", exports)
-	}
+// unreportedBuildRunner replays the dry-run read with an API server that
+// cannot say what it was built from, as a binary not built by ko.
+type unreportedBuildRunner struct{ inner execx.Runner }
 
-	press("enter") // the installed images again
-	typeReleaseImages(t, app)
-	if app.mach.Current() != state.UpgradePlan {
-		t.Fatalf("after images: %v", app.mach.Current())
-	}
-	plan := app.cur.(*upgradePlanScreen)
-	if plan.blocked == "" || plan.comp != nil {
-		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", testImageTag, plan.blocked)
-	}
-	if view := app.View(); !strings.Contains(view, "same as the installed one") {
-		t.Errorf("plan view should say why:\n%s", view)
-	}
-	press("b")
-	if app.mach.Current() != state.Images {
-		t.Fatalf("back from the refusal should return to the images step, got %v", app.mach.Current())
-	}
-}
-
-// midUpgradeRunner replays the dry-run read with a second version running,
-// as a cluster looks partway through a roll.
-type midUpgradeRunner struct{ inner execx.Runner }
-
-func (r midUpgradeRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
+func (r unreportedBuildRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
 	if spec.Label == "read the installed Substrate" {
-		lines := slices.Clone(spec.SimLines)
-		lines[0] += " v9.9.9"
-		spec.SimLines = lines
+		spec.SimLines = []string{"SUBSTRATE_GKE_BUILD "}
 	}
 	return r.inner.Start(ctx, spec)
 }
 
-// With two versions running, the commit read off the API server belongs to
-// the version it reports being. Choosing the other one is allowed, but its
-// commit has to be typed in, with everything else already filled.
-func TestUpgradeTrackAsksForTheCommitWhenTheAPIServerRunsTheOtherVersion(t *testing.T) {
+// An API server that does not report its build sends the track to the form,
+// with a note saying why.
+func TestUpgradeTrackAsksWhenTheAPIServerCannotSay(t *testing.T) {
 	app := testApp(t)
 	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-	app.deps.Runner = midUpgradeRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+	app.deps.Runner = unreportedBuildRunner{inner: execx.DryRun{Delay: time.Millisecond}}
 	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	press := func(keys ...string) {
@@ -1659,38 +1587,84 @@ func TestUpgradeTrackAsksForTheCommitWhenTheAPIServerRunsTheOtherVersion(t *test
 	typeText(t, app, "acme")
 	press("enter", "enter", "enter")
 	scr := app.cur.(*upgradeSourceScreen)
-	if scr.mode != "choose" || len(scr.choices) != 2 {
-		t.Fatalf("two running versions should be offered, mode=%s choices=%v", scr.mode, scr.choices)
+	if scr.mode != "manual" || !strings.Contains(scr.note, "did not report") {
+		t.Fatalf("the form should ask: mode=%s note=%q", scr.mode, scr.note)
 	}
-	press("enter") // the API server's own version: its commit is known
-	if app.mach.Current() != state.Images || app.deps.Setup.InstalledCommit != snapshot.Commit {
-		t.Fatalf("choosing the API server's version: %v commit=%q", app.mach.Current(), app.deps.Setup.InstalledCommit)
-	}
-
-	app = testApp(t)
-	app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
-	app.deps.Runner = midUpgradeRunner{inner: execx.DryRun{Delay: time.Millisecond}}
-	app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
-	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
-	press("3", "enter", "enter")
-	typeText(t, app, "acme")
-	press("enter", "enter", "enter", "j", "enter") // the other version
-	scr = app.cur.(*upgradeSourceScreen)
-	if scr.mode != "manual" || !strings.Contains(scr.note, "not v9.9.9") {
-		t.Fatalf("the other version's commit should be asked for: mode=%s note=%q", scr.mode, scr.note)
-	}
-	if scr.value(0) != "" || scr.value(1) != "v9.9.9" {
-		t.Errorf("manual form should offer the version and an empty commit, got %q / %q", scr.value(0), scr.value(1))
+	if scr.value(0) != "" || scr.value(1) != "" {
+		t.Errorf("the form should start empty, got %q / %q", scr.value(0), scr.value(1))
 	}
 }
 
-// The upgrade track is ahead of the releases, and the first screen says so
-// before anyone picks it.
-func TestWelcomeSaysUpgradesAreNotYetSupported(t *testing.T) {
+// The plan refuses what the runbook does not support: upgrading a version
+// onto itself, and moving between pre-built images and a build from source,
+// which the record decides. Back from the refusal is the images step.
+func TestUpgradeTrackRefusesAnUnsupportedUpgrade(t *testing.T) {
+	records := t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	walk := func(t *testing.T, version string) *App {
+		t.Helper()
+		app := testApp(t)
+		app.deps.Builder = snapshot.NewBuilder(t.TempDir(), true)
+		app.deps.Runner = noRecordRunner{inner: execx.DryRun{Delay: time.Millisecond}}
+		app.deps.UpgradeDir = filepath.Join(t.TempDir(), "upgrades")
+		pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
+		press := func(keys ...string) {
+			for _, k := range keys {
+				pump(t, app, key(k))
+			}
+		}
+		press("3", "enter", "enter")
+		typeText(t, app, "acme")
+		press("enter", "enter", "enter", "m")
+		typeText(t, app, snapshot.Commit)
+		press("enter")
+		typeText(t, app, version)
+		press("enter", "enter") // the form, then pre-built images
+		typeReleaseImages(t, app)
+		if app.mach.Current() != state.UpgradePlan {
+			t.Fatalf("after images: %v", app.mach.Current())
+		}
+		return app
+	}
+
+	app := walk(t, testImageTag)
+	plan := app.cur.(*upgradePlanScreen)
+	if plan.blocked == "" || plan.comp != nil {
+		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", testImageTag, plan.blocked)
+	}
+	if view := app.View(); !strings.Contains(view, "the version it runs") {
+		t.Errorf("plan view should say why:\n%s", view)
+	}
+	pump(t, app, key("b"))
+	if app.mach.Current() != state.Images {
+		t.Fatalf("back from the refusal should return to the images step, got %v", app.mach.Current())
+	}
+
+	st := state.NewSetup()
+	st.ProjectID = "acme"
+	record, err := snapshot.RecordPath(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("ko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app = walk(t, "substrate-0123456789ab")
+	if plan := app.cur.(*upgradePlanScreen); !strings.Contains(plan.blocked, "build from source") {
+		t.Errorf("moving a source install to pre-built images should be refused, got %q", plan.blocked)
+	}
+}
+
+// The first screen says which upgrades the track supports before anyone
+// picks it.
+func TestWelcomeSaysWhichUpgradesAreSupported(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 50})
-	if view := app.View(); !strings.Contains(view, "Coming in a later release") || !strings.Contains(view, "reinstall") {
-		t.Errorf("welcome should say the upgrade track is not yet supported:\n%s", view)
+	if view := app.View(); !strings.Contains(view, "later patch release") || !strings.Contains(view, "next minor release") {
+		t.Errorf("welcome should say which upgrades are supported:\n%s", view)
 	}
 }
 
@@ -1801,7 +1775,7 @@ func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
 	typeText(t, app, "acme")
 	press("enter", "enter", "enter")
 	st := app.deps.Setup
-	if app.mach.Current() != state.Images || st.InstalledCommit == "" || st.KoDockerRepo == "" {
+	if app.mach.Current() != state.Images || st.InstalledCommit == "" || st.InstalledVersion == "" {
 		t.Fatalf("first read should have succeeded: %v %+v", app.mach.Current(), st)
 	}
 	pump(t, app, tea.KeyMsg{Type: tea.KeyEsc}) // back to the cluster form
@@ -1817,8 +1791,8 @@ func TestUpgradeTrackForgetsTheInstalledSideOnRetarget(t *testing.T) {
 		t.Fatalf("second read should fail: mode=%s failed=%v", scr.mode, scr.comp.failed)
 	}
 	press("m")
-	if scr.value(0) != "" || scr.value(1) != "" || scr.value(2) != "" || scr.value(3) != "" || st.KoDockerRepo != "" {
-		t.Errorf("manual form offers the first cluster's facts: %q %q %q ko=%q", scr.value(0), scr.value(1), scr.value(2), st.KoDockerRepo)
+	if scr.value(0) != "" || scr.value(1) != "" {
+		t.Errorf("manual form offers the first cluster's facts: %q %q", scr.value(0), scr.value(1))
 	}
 }
 
@@ -1850,9 +1824,18 @@ func TestBackFromCompleteClearsCompleted(t *testing.T) {
 }
 
 type installedClusterRunner struct {
-	inner    execx.Runner
-	versions string
-	calls    *int
+	inner   execx.Runner
+	version string
+	calls   *int
+}
+
+// installedLine is what CheckInstalled prints for a running install whose API
+// server reports version, or for a bare namespace when version is empty.
+func installedLine(version string) string {
+	if version == "" {
+		return "SUBSTRATE_GKE_INSTALLED true"
+	}
+	return "SUBSTRATE_GKE_INSTALLED true atelet " + version + " commit=" + snapshot.Commit + " built=2026-10-22T00:00:00Z linux/amd64"
 }
 
 func (r installedClusterRunner) Start(ctx context.Context, spec execx.Spec) <-chan execx.Event {
@@ -1861,7 +1844,7 @@ func (r installedClusterRunner) Start(ctx context.Context, spec execx.Spec) <-ch
 			*r.calls++
 		}
 		ch := make(chan execx.Event, 2)
-		ch <- execx.Event{Line: strings.TrimSpace("SUBSTRATE_GKE_INSTALLED true " + r.versions)}
+		ch <- execx.Event{Line: installedLine(r.version)}
 		ch <- execx.Event{Done: true}
 		close(ch)
 		return ch
@@ -1892,7 +1875,7 @@ func pressToCluster(t *testing.T, app *App) func(keys ...string) {
 func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	app := testApp(t)
 	calls := 0
-	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, versions: "substrate-71e7623", calls: &calls}
+	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, version: "substrate-71e7623", calls: &calls}
 	press := pressToCluster(t, app)
 	// The list load already background-probed the four substrate-ready
 	// clusters (substrate-ga is ready through v1); legacy-prod is not ready,
@@ -1962,7 +1945,7 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 func TestListBackgroundProbesReadyClusters(t *testing.T) {
 	app := testApp(t)
 	calls := 0
-	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, versions: "substrate-0b3d2d078f64", calls: &calls}
+	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, version: "substrate-0b3d2d078f64", calls: &calls}
 	pressToCluster(t, app)
 
 	if calls != 4 {
@@ -2782,7 +2765,7 @@ func TestTeardownReprobesForReal(t *testing.T) {
 // guard exists to prevent.
 func TestTypedInstalledClusterNameIsStillGuarded(t *testing.T) {
 	app := testApp(t)
-	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, versions: "substrate-71e7623"}
+	app.deps.Runner = installedClusterRunner{inner: execx.DryRun{Delay: time.Millisecond}, version: "substrate-71e7623"}
 	press := pressToCluster(t, app)
 
 	press("enter") // cursor defaults to "Create a new cluster" -> name mode
@@ -2812,7 +2795,7 @@ func (r *teardownClusterRunner) Start(ctx context.Context, spec execx.Spec) <-ch
 	case "ate-setup delete ate-system":
 		r.torn = true
 	case "check for existing Substrate installation":
-		line := "SUBSTRATE_GKE_INSTALLED true substrate-0b3d2d078f64"
+		line := installedLine("substrate-0b3d2d078f64")
 		if r.torn {
 			line = "SUBSTRATE_GKE_INSTALLED false"
 		}

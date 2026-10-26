@@ -229,17 +229,11 @@ type Setup struct {
 	// Upgrade selects the upgrade track: the cluster is already installed,
 	// and the run prepares upstream's rolling upgrade instead of installing.
 	Upgrade bool
-	// InstalledRepo, InstalledCommit and InstalledVersion describe the
-	// Substrate a cluster runs today, read off the cluster itself; an
-	// upgrade fetches that tree for rollback.
-	InstalledRepo    string
+	// InstalledCommit and InstalledVersion describe the Substrate a cluster
+	// runs today, as its API server reports them; an upgrade fetches that
+	// tree for rollback.
 	InstalledCommit  string
 	InstalledVersion string
-	// InstalledImageRepo and InstalledImageTag are set when the installed
-	// version runs published images; a build from source leaves them empty
-	// and its registry in KoDockerRepo.
-	InstalledImageRepo string
-	InstalledImageTag  string
 
 	// ImageRepo and ImageTag name an already-published set of Substrate
 	// images for ate-setup to install. When ImageRepo is empty the images are

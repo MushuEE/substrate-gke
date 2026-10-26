@@ -998,11 +998,11 @@ type clusterScreen struct {
 	// Substrate), "partial" (ate-system namespace without atelet),
 	// "teardown-confirm"/"teardown" (deleting the control plane so the
 	// install can continue here), "confirm" (incompatible cluster chosen).
-	mode              string
-	nameInput         textinput.Model
-	comp              *execComp
-	parsed            bool
-	installedVersions []string
+	mode             string
+	nameInput        textinput.Model
+	comp             *execComp
+	parsed           bool
+	installedVersion string
 	// probed caches results per cluster, so browsing back and forth does not
 	// pay the multi-second gcloud+kubectl round trip again. [r] re-probes.
 	probed map[string]snapshot.InstalledProbe
@@ -1154,7 +1154,7 @@ func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.C
 		s.mode = "partial"
 		return nil
 	case res.Installed:
-		s.mode, s.installedVersions = "installed", res.Versions
+		s.mode, s.installedVersion = "installed", res.Version
 		return nil
 	case !c.SubstrateReady():
 		s.mode = "confirm"
@@ -1628,8 +1628,8 @@ func (s *clusterScreen) View(w int) string {
 	case "installed":
 		sel := s.clusters[s.cursor]
 		var verStr string
-		if len(s.installedVersions) > 0 {
-			verStr = fmt.Sprintf(" (version: %s)", strings.Join(s.installedVersions, ", "))
+		if s.installedVersion != "" {
+			verStr = fmt.Sprintf(" (version: %s)", s.installedVersion)
 		}
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
 			theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))+"\n\n"+
