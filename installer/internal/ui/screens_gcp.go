@@ -560,7 +560,7 @@ func dockerProblem(failed []failedCheck, retryKey string) string {
 			fmt.Fprintf(&b, "    fix: %s\n", f.res.Fix)
 		}
 	}
-	fmt.Fprintf(&b, "Fix them, then press [%s] to check again. Or set ATE_ATENET_DATAPLANE=agentgateway before starting the installer, which builds nothing with docker.", retryKey)
+	fmt.Fprintf(&b, "Fix them, then press [%s] to check again.", retryKey)
 	return b.String()
 }
 

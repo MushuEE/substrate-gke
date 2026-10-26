@@ -439,7 +439,6 @@ func TestSpecsBlankAnInheritedKubectlContext(t *testing.T) {
 }
 
 func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
-	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
 	st := testSetup(t)
 	st.SandboxClass = state.SandboxMicroVM
 	b := NewBuilder(fakeCheckout(t), false)
@@ -470,13 +469,8 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 	}
 	_, stagedSteps := b.NextSteps(st)
 	joined := strings.Join(stagedSteps, "\n")
-	for _, want := range []string{
-		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template counter-microvm",
-		"ate-target-actor: ate-demo-counter-microvm/my-counter-1",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
-		}
+	if want := "kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template counter-microvm"; !strings.Contains(joined, want) {
+		t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
 	}
 
 	// On a pre-built install (even if ImageTag carries a digest), DeployDemo
@@ -1550,8 +1544,8 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 	}
 }
 
-// Only a build from source of a tree with the envoy-dataplane image, under the
-// envoy router, runs docker. Asking anyone else for docker would block
+// Only a build from source of a tree with the envoy-dataplane image runs
+// docker. Asking anyone else for docker would block
 // installs that never touch it.
 func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
@@ -1564,15 +1558,6 @@ func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
 	if !b.BuildsWithDocker(st) {
 		t.Error("a source build of a tree with envoy-dataplane must need docker")
 	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "envoy")
-	if !b.BuildsWithDocker(st) {
-		t.Error("ATE_ATENET_DATAPLANE=envoy is the default, so it must still need docker")
-	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
-	if b.BuildsWithDocker(st) {
-		t.Error("the agentgateway router builds nothing with docker")
-	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "")
 	st.ImageRepo, st.ImageTag = testImageRepo, "v0.2.0"
 	if b.BuildsWithDocker(st) {
 		t.Error("a pre-built install must not need docker")
@@ -1798,22 +1783,15 @@ func TestDeployAndUpgradeCarryTheIngressAllowlist(t *testing.T) {
 	}
 }
 
-// The tour depends on the router: agentgateway serves plain HTTP, the Envoy
-// router admits only allowlisted clients, and a tree with the counter driver
-// runs such a client.
+// The Envoy router admits only allowlisted clients, so the tour cannot curl an
+// actor from the user's machine; a tree with the counter driver runs such a
+// client.
 func TestNextStepsFollowTheRouter(t *testing.T) {
 	st := testSetup(t)
 	root := fakeCheckout(t)
 	b := NewBuilder(root, false)
 
-	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
 	lead, demo := b.NextSteps(st)
-	if !strings.Contains(lead, "port-forward") || !strings.Contains(strings.Join(demo, "\n"), "curl ") || b.RouterNote() != "" {
-		t.Errorf("agentgateway: lead %q, demo %v, note %q", lead, demo, b.RouterNote())
-	}
-
-	t.Setenv("ATE_ATENET_DATAPLANE", "")
-	lead, demo = b.NextSteps(st)
 	joined := strings.Join(demo, "\n")
 	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
 		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
@@ -1846,5 +1824,19 @@ func TestDeployAndUpgradeCarryTheSnapshotLocation(t *testing.T) {
 	}
 	if exports := b.NewExports(st); !strings.Contains(exports, "export SNAPSHOT_LOCATION='gs://ate-snapshots-acme-c-z/'") {
 		t.Errorf("upgrade exports lack the snapshot location:\n%s", exports)
+	}
+}
+
+// The control-plane deploy and the upgrade hand-over name the envoy dataplane,
+// whatever the caller exported.
+func TestDeployAndUpgradeNameTheEnvoyDataplane(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
+	st := testSetup(t)
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_ATENET_DATAPLANE=envoy") {
+		t.Errorf("deploy env lacks ATE_ATENET_DATAPLANE=envoy: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_ATENET_DATAPLANE='envoy'") {
+		t.Errorf("upgrade exports lack the envoy dataplane:\n%s", exports)
 	}
 }

@@ -330,9 +330,7 @@ func (s *controlPlaneScreen) View(w int) string {
 		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
-	if snapshot.EnvoyRouter() {
-		subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary() + "."
-	}
+	subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary() + "."
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 

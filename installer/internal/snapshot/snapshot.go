@@ -381,14 +381,13 @@ func (b *Builder) KubectlAteInstall() string {
 // executed by the wizard, so no test will catch the drift — the user is the
 // one who runs it.
 //
-// What a user can run depends on the router. agentgateway serves plain HTTP
-// on port 80, so the tour port-forwards it and curls the actor. The Envoy
-// router, upstream's default, serves only TLS and admits only clients that
-// present an allowlisted pod certificate (see RouterNote), so a curl from the
-// user's machine is refused. A tree with the counter demo's driver
+// The Envoy router serves only TLS and admits only clients that present an
+// allowlisted pod certificate (see RouterNote), so a curl from the user's
+// machine is refused. A tree with the counter demo's driver
 // (agent-substrate/substrate#3178) runs such a client in the demo namespace,
 // and the tour reads its logs; without one, the tour stops at creating the
-// actor. lead is "" when there is nothing to run before the demo.
+// actor. lead is "" when there is nothing to run before the demo; it is kept
+// for the callers, which print it when set.
 func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 	// The atespace and ActorTemplate the counter demo creates. `ate-setup
 	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
@@ -401,7 +400,7 @@ func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 		demoTemplate = "counter-microvm"
 	}
 
-	if EnvoyRouter() && b.hasCounterDriver() {
+	if b.hasCounterDriver() {
 		return "", []string{"kubectl logs -n " + demoAtespace + " -l app=counter-driver -f"}
 	}
 
@@ -409,15 +408,7 @@ func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 	if b.Managed {
 		installAte = b.KubectlAteInstall()
 	}
-	createActor := "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate
-	if EnvoyRouter() {
-		return "", []string{installAte, createActor}
-	}
-	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
-		installAte,
-		createActor,
-		`curl -X POST -H "ate-target-actor: ` + demoAtespace + `/my-counter-1" http://localhost:8000/`,
-	}
+	return "", []string{installAte, "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate}
 }
 
 // CounterDriverDir is the counter demo's driver, an in-cluster client of the
@@ -432,12 +423,8 @@ func (b *Builder) hasCounterDriver() bool {
 }
 
 // RouterNote explains how to reach actors through the Envoy router, which
-// admits only allowlisted clients, or is "" for agentgateway, which admits
-// anyone.
+// admits only allowlisted clients.
 func (b *Builder) RouterNote() string {
-	if !EnvoyRouter() {
-		return ""
-	}
 	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
 		IngressAllowlistSummary() + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
 		" and the substrate-gke README."
@@ -545,8 +532,8 @@ func (b *Builder) CleanupCommand(st *state.Setup) string {
 
 // BuildsWithDocker reports whether deploying the control plane runs `docker
 // buildx build --push` against st.KoDockerRepo, which ate-setup does for the
-// envoy-dataplane image. That takes the envoy router, ate-setup's default
-// unless ATE_ATENET_DATAPLANE names another, and a tree that has the image.
+// envoy-dataplane image. Every install deploys the envoy router (see
+// Dataplane), so that takes a tree that has the image.
 //
 // ko reads gcloud's credentials by itself; docker reads only its own config.
 // So a host where every ko image pushes can still fail here, after the
@@ -559,9 +546,6 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	if st.Prebuilt() {
 		return false
 	}
-	if !EnvoyRouter() {
-		return false
-	}
 	if !b.Managed {
 		// A tree the user supplied is built as it stands, whatever revision
 		// the images step recorded.
@@ -570,12 +554,27 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	return b.envoy
 }
 
-// EnvoyRouter reports whether ate-setup deploys the envoy router, its default
-// unless ATE_ATENET_DATAPLANE names another. Only the envoy router is built
-// with docker.
-func EnvoyRouter() bool {
-	router := os.Getenv("ATE_ATENET_DATAPLANE")
-	return router == "" || router == "envoy"
+// Dataplane is the atenet dataplane every install deploys, and the only one
+// the GKE installer supports. ate-setup also offers agentgateway through
+// ATE_ATENET_DATAPLANE, but it has no support policy for GKE installs, so the
+// doctor refuses it (see UnsupportedDataplane) and the control-plane deploy
+// names envoy explicitly.
+const Dataplane = "envoy"
+
+// UnsupportedDataplane returns the caller's ATE_ATENET_DATAPLANE when it names
+// a dataplane other than Dataplane, and "" when it is unset or Dataplane.
+func UnsupportedDataplane() string {
+	if v := os.Getenv("ATE_ATENET_DATAPLANE"); v != "" && v != Dataplane {
+		return v
+	}
+	return ""
+}
+
+// dataplaneEnv passes Dataplane to ate-setup, replacing any value the caller
+// exported. The doctor has already refused another value; this keeps a run
+// that skipped it on envoy too.
+func dataplaneEnv() []string {
+	return []string{"ATE_ATENET_DATAPLANE=" + Dataplane}
 }
 
 // HasEnvoyDockerfile reports whether the Substrate tree at root builds the
@@ -856,7 +855,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv()),
+		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -908,8 +907,8 @@ var DemoClientSPIFFEIDs = []string{
 // ATE_INGRESS_ALLOWED_SPIFFE_IDS, without duplicates. ate-setup reads the
 // variable as one value and does not combine it with anything, so the
 // installer joins the two lists itself. From Substrate v0.6.0, ate-setup
-// refuses to deploy the Envoy router without an allowlist; older trees and
-// the agentgateway router ignore it.
+// refuses to deploy the Envoy router without an allowlist; older trees ignore
+// it.
 func IngressAllowedSPIFFEIDs() []string {
 	ids := slices.Clone(DemoClientSPIFFEIDs)
 	for _, id := range strings.Split(os.Getenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS"), ",") {

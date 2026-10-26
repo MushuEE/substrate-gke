@@ -235,15 +235,15 @@ volume and the router's serving CA with a `clusterTrustBundle` one; upstream's
 [router README](https://github.com/agent-substrate/substrate/blob/main/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization)
 shows both.
 
-The demo's next steps follow the router. A Substrate tree whose counter demo has a
-driver pod ([agent-substrate/substrate#3178](https://github.com/agent-substrate/substrate/pull/3178))
+For the demo's next steps, a Substrate tree whose counter demo has a driver pod ([agent-substrate/substrate#3178](https://github.com/agent-substrate/substrate/pull/3178))
 reads its logs, `kubectl logs -n ate-demo-counter -l app=counter-driver -f`, which show
 it calling the actor through the router. v0.6.0 has no driver, so the tour stops at
 creating the actor.
 
-`ATE_ATENET_DATAPLANE=agentgateway` selects the agentgateway router instead. It needs
-no allowlist and serves plain HTTP on port 80, so the next steps port-forward it and
-`curl` the actor, but it does not authenticate clients.
+The installer deploys the Envoy router only. `ate-setup` also offers agentgateway
+through `ATE_ATENET_DATAPLANE`, but it has no support policy for GKE installs, so the
+setup check (step 1) fails if `ATE_ATENET_DATAPLANE` is set to anything other than
+`envoy`.
 
 ## Where the images come from
 

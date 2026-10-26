@@ -3478,7 +3478,7 @@ func TestProvisionDockerErrorWrapsToTheScreen(t *testing.T) {
 			t.Errorf("line %d is %d wide, past %d:\n%s", i, lipgloss.Width(line), width, line)
 		}
 	}
-	for _, want := range []string{"the envoy-dataplane push would be refused", "gcloud auth configure-docker us-west1-docker.pkg.dev", "ATE_ATENET_DATAPLANE=agentgateway"} {
+	for _, want := range []string{"the envoy-dataplane push would be refused", "gcloud auth configure-docker us-west1-docker.pkg.dev", "press [r] to check again"} {
 		if !strings.Contains(flat(view), want) {
 			t.Errorf("view lost %q:\n%s", want, view)
 		}
