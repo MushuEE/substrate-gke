@@ -266,12 +266,13 @@ func (s *upgradeSourceScreen) View(w int) string {
 
 // ─── Prepare the upgrade ───────────────────────────────────────────────────
 
-// upgradePlanScreen fetches the two trees the runbook runs from and hands
-// over: it changes nothing on the cluster. It refuses to prepare an upgrade
-// the runbook does not support.
+// upgradePlanScreen fetches the two trees the runbook runs from, then, when
+// asked, sets up ~/ate-upgrade the way the runbook's "Before you start" does,
+// and hands over. Nothing on the cluster changes. It refuses to prepare an
+// upgrade the runbook does not support.
 type upgradePlanScreen struct {
 	deps                  *Deps
-	comp                  *execComp
+	fetch, prepare        *execComp
 	installedDir, nextDir string
 	// blocked says why nothing was fetched; the only way on is back.
 	blocked string
@@ -290,61 +291,79 @@ func newUpgradePlanScreen(deps *Deps) *upgradePlanScreen {
 		return s
 	}
 	s.installedDir, s.nextDir = deps.Builder.UpgradeTrees(deps.UpgradeDir, st)
-	s.comp = newExecComp(deps.Runner, deps.Builder.FetchTrees(st, s.installedDir, s.nextDir), nil, deps.LogPath)
+	s.fetch = newExecComp(deps.Runner, deps.Builder.FetchTrees(st, s.installedDir, s.nextDir), nil, deps.LogPath)
 	return s
 }
 
 func (s *upgradePlanScreen) Init() tea.Cmd {
-	if s.comp == nil {
+	if s.fetch == nil {
 		return nil
 	}
-	return s.comp.start()
+	return s.fetch.start()
 }
 func (s *upgradePlanScreen) CapturesText() bool { return false }
-func (s *upgradePlanScreen) logComp() *execComp { return s.comp }
 
-// Stop ends a fetch left running when the screen is navigated away from.
+// current is the command the screen is on: the set-up once it has begun,
+// else the fetch.
+func (s *upgradePlanScreen) current() *execComp {
+	if s.prepare != nil {
+		return s.prepare
+	}
+	return s.fetch
+}
+
+func (s *upgradePlanScreen) logComp() *execComp { return s.current() }
+
+// Stop ends a command left running when the screen is navigated away from.
 func (s *upgradePlanScreen) Stop() {
-	if s.comp != nil {
-		s.comp.stop()
+	if c := s.current(); c != nil {
+		c.stop()
 	}
 }
 
 func (s *upgradePlanScreen) Hints() []Hint {
+	c := s.current()
 	switch {
-	case s.comp == nil:
+	case c == nil:
 		return []Hint{{"b", "back"}}
-	case s.comp.ok():
+	case c.ok() && s.prepare == nil:
+		return []Hint{{"enter", "set up " + snapshot.UpgradeHome}, {"b", "back"}}
+	case c.ok():
 		return []Hint{{"enter", "finish"}}
-	case s.comp.failed != nil:
+	case c.failed != nil:
 		return []Hint{{"r", "retry"}, {"b", "back"}}
 	}
 	return nil
 }
 
 func (s *upgradePlanScreen) Update(msg tea.Msg) tea.Cmd {
-	if s.comp == nil {
+	c := s.current()
+	if c == nil {
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "b" || key.String() == "esc") {
 			return goBack
 		}
 		return nil
 	}
-	if cmd, handled := s.comp.update(msg); handled {
+	if cmd, handled := c.update(msg); handled {
 		return cmd
 	}
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "enter":
-			if s.comp.ok() {
+			switch {
+			case c.ok() && s.prepare == nil:
+				s.prepare = newExecComp(s.deps.Runner, s.deps.Builder.PrepareUpgrade(s.deps.Setup, s.installedDir, s.nextDir), nil, s.deps.LogPath)
+				return s.prepare.start()
+			case c.ok():
 				return goNext
 			}
 		case "r":
-			if s.comp.failed != nil {
-				return s.comp.restart()
+			if c.failed != nil {
+				return c.restart()
 			}
 		case "b", "esc":
-			if !s.comp.running() {
-				s.comp.stop()
+			if !c.running() {
+				c.stop()
 				return goBack
 			}
 		}
@@ -360,25 +379,41 @@ func (s *upgradePlanScreen) View(w int) string {
 		b.WriteString(theme.ErrorPanel.Width(min(w-4, 74)).Render(theme.Bad.Render(s.blocked)))
 		return b.String()
 	}
-	b.WriteString(theme.Subtle.Render(fmt.Sprintf(
-		"Fetching the installed tree and the new one for %s. Nothing on the cluster changes here.", st.ClusterName)) + "\n\n")
-	b.WriteString(s.comp.view(w))
-	if s.comp.ok() {
-		b.WriteString("\n" + handOver(s.deps, w, s.installedDir, s.nextDir))
-		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish.") + theme.Subtle.Render("  The commands are printed again when the installer exits."))
+	if s.prepare == nil {
+		b.WriteString(theme.Subtle.Width(w-4).Render(fmt.Sprintf(
+			"Fetching the installed tree and the new one for %s. Nothing on the cluster changes here.", st.ClusterName)) + "\n\n")
+		b.WriteString(s.fetch.view(w))
+		if s.fetch.ok() {
+			b.WriteString("\n" + theme.Title.Render("Next: set up "+snapshot.UpgradeHome+", the directory the upgrade runbook works in") + "\n")
+			b.WriteString(theme.Subtle.Width(w-4).Render(strings.Join([]string{
+				"  · old.yaml and new.yaml: copies of the cluster's ate-setup record",
+				"  · old and new: links to the two trees",
+				"  · kubectl-ate from the installed release",
+				"  · the cluster's credentials and the snapshot transfer service account",
+			}, "\n")) + "\n\n")
+			b.WriteString(theme.Good.Render("Press [enter] to set up " + snapshot.UpgradeHome + "."))
+		}
+		return b.String()
+	}
+	b.WriteString(theme.Subtle.Width(w-4).Render(fmt.Sprintf(
+		"Setting up %s for %s. Nothing on the cluster changes here.", snapshot.UpgradeHome, st.ClusterName)) + "\n\n")
+	b.WriteString(s.prepare.view(w))
+	if s.prepare.ok() {
+		b.WriteString("\n" + handOver(s.deps, w))
+		b.WriteString("\n" + theme.Good.Render("Press [enter] to finish.") + theme.Subtle.Render("  The line is printed again when the installer exits."))
 	}
 	return b.String()
 }
 
-// handOver renders the upgrade hand-over: the runbook as the next step, the
-// commands to paste in a panel of their own, at full width because a wrapped
-// path is copied short, and the notes under it.
-func handOver(deps *Deps, w int, installedDir, nextDir string) string {
+// handOver renders the upgrade hand-over: the runbook as the next step, and
+// the line to run in a panel of its own, at full width because a wrapped
+// line is copied short, with the notes under it.
+func handOver(deps *Deps, w int) string {
 	st, builder := deps.Setup, deps.Builder
 	var b strings.Builder
-	b.WriteString(theme.Title.Render("Next: run these commands once, then follow the upgrade runbook from step 1") + "\n")
+	b.WriteString(theme.Title.Render("Next: run this in the shell you upgrade from, then follow the upgrade runbook from step 1") + "\n")
 	b.WriteString(theme.Accent.Render("  "+snapshot.RunbookURL) + "\n\n")
-	b.WriteString(theme.AccentPanel.Width(w-4).Render(strings.Join(builder.UpgradeCommands(st, installedDir, nextDir), "\n")) + "\n")
+	b.WriteString(theme.AccentPanel.Width(w-4).Render(builder.UpgradeShellLine(st)) + "\n")
 	for _, note := range builder.UpgradeNotes(st) {
 		b.WriteString("\n" + theme.Warning.Width(w-4).Render(note) + "\n")
 	}

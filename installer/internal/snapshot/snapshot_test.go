@@ -1494,9 +1494,8 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if _, err := os.Stat(missingDir); err == nil {
 		t.Errorf("a failed fetch should leave no tree at %s", missingDir)
 	}
-	// Pasting the "Before you start" block lays out ~/ate-upgrade the way
-	// the runbook's own block does, from the trees just fetched and the
-	// cluster's record.
+	// Setting up ~/ate-upgrade lays it out the way the runbook's own block
+	// does, from the trees just fetched and the cluster's record.
 	home, records := t.TempDir(), t.TempDir()
 	t.Setenv("ATE_RECORD_DIR", records)
 	record, err := RecordPath(st)
@@ -1506,8 +1505,12 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if want := filepath.Join(records, "installs", "gke_acme_"+st.Zone+"_"+st.ClusterName+".yaml"); record != want {
 		t.Fatalf("RecordPath = %q, want %q", record, want)
 	}
-	if notes := strings.Join(b.UpgradeNotes(st), "\n"); !strings.Contains(notes, "no ate-setup record") || !strings.Contains(notes, record) {
-		t.Errorf("a missing record should be called out:\n%s", notes)
+	prepare := b.PrepareUpgrade(st, installedDir, nextDir)
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "no ate-setup record") || !strings.Contains(out, record) {
+		t.Errorf("a missing record should stop the set-up (%v):\n%s", err, out)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "ate-upgrade")); err == nil {
+		t.Errorf("a set-up without a record should leave no ~/ate-upgrade")
 	}
 	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
 		t.Fatal(err)
@@ -1515,46 +1518,97 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if err := os.WriteFile(record, []byte("cluster:\n  substrateVersion: "+st.InstalledVersion+"\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	notes := strings.Join(b.UpgradeNotes(st), "\n")
-	if strings.Contains(notes, "no ate-setup record") || !strings.Contains(notes, "export VERSION="+ShellQuote(st.InstalledVersion)) {
-		t.Errorf("with a record, a build from source needs only the rollback version:\n%s", notes)
+	// It creates the service account for the bucket the record names, which
+	// the upgrade track never asks for, and installs the installed release's
+	// kubectl-ate.
+	if out, err := runPrepare(t, prepare, home); err != nil {
+		t.Fatalf("set-up: %v\n%s", err, out)
 	}
-	cmds := b.UpgradeCommands(st, installedDir, nextDir)
-	for _, cmd := range cmds {
-		if strings.HasPrefix(cmd, "#") || strings.HasPrefix(cmd, "sed -i") {
-			t.Errorf("a build from source with a record needs no %q", cmd)
-		}
+	if got, _ := os.Readlink(filepath.Join(home, "ate-upgrade", "old")); got != installedDir {
+		t.Errorf("~/ate-upgrade/old links to %q, want %q", got, installedDir)
 	}
-	if summary := b.UpgradeSummary(st, installedDir, nextDir); !strings.Contains(summary, RunbookURL) || !strings.Contains(summary, cmds[len(cmds)-1]) {
-		t.Errorf("UpgradeSummary lacks the runbook or the commands:\n%s", summary)
+	if got, _ := os.Readlink(filepath.Join(home, "ate-upgrade", "new")); got != nextDir {
+		t.Errorf("~/ate-upgrade/new links to %q, want %q", got, nextDir)
 	}
-	// Pasting the commands lays out ~/ate-upgrade the way the runbook's own
-	// block does, from the trees just fetched and the cluster's record, and
-	// creates the service account for the bucket the record names, which
-	// the upgrade track never asks for.
-	script := append([]string{"export HOME=" + ShellQuote(home), "gcloud() { :; }", `go() { [ "$1" != -C ] || printf '%s\n' "$@" > ~/go-args; }`}, cmds...)
-	script = append(script, `printf '%s|%s|%s|%s|%s' "$VERSION" "$PWD" "$(readlink ~/ate-upgrade/old)" "$(cat ~/ate-upgrade/old.yaml)" "$(tail -1 ~/go-args)"`)
-	out, err := exec.Command("bash", "-euo", "pipefail", "-c", strings.Join(script, "\n")).Output()
-	want := b.SubstrateVersion(st) + "|" + filepath.Join(home, "ate-upgrade", "new") + "|" + installedDir + "|cluster:\n  substrateVersion: " + st.InstalledVersion + "\nstorage:\n  bucketName: ate-snapshots-acme|ate-snapshots-acme"
-	if err != nil || string(out) != want {
-		t.Errorf("pasting the commands gave %q, %v; want %q", out, err, want)
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "bucketName: ate-snapshots-acme") {
+		t.Errorf("old.yaml is not the record:\n%s", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "go-args")); !strings.Contains(string(got), "-C\n"+installedDir+"\ninstall\n./cmd/kubectl-ate") || !strings.HasSuffix(string(got), "--bucket\nate-snapshots-acme\n") {
+		t.Errorf("go ran with:\n%s", got)
+	}
+	// A second set-up must not replace the first: it may hold what that
+	// upgrade's rollback needs.
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "left from an earlier upgrade") {
+		t.Errorf("a second set-up should refuse (%v):\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(home, "ate-upgrade", "old.yaml")); err != nil {
+		t.Errorf("the refused set-up touched the first one: %v", err)
+	}
+	// The hand-over line moves a shell to the new tree with the version a
+	// build from source needs.
+	line := b.UpgradeShellLine(st)
+	out, err := exec.Command("bash", "-c", "export HOME="+ShellQuote(home)+"\n"+line+"\nprintf '%s|%s' \"$PWD\" \"$VERSION\"").Output()
+	if want := filepath.Join(home, "ate-upgrade", "new") + "|" + b.SubstrateVersion(st); err != nil || string(out) != want {
+		t.Errorf("the hand-over line gave %q, %v; want %q", out, err, want)
+	}
+	if notes := strings.Join(b.UpgradeNotes(st), "\n"); !strings.Contains(notes, "export VERSION="+st.InstalledVersion+" there") {
+		t.Errorf("a build from source needs the rollback version:\n%s", notes)
+	}
+	if summary := b.UpgradeSummary(st); !strings.Contains(summary, RunbookURL) || !strings.Contains(summary, line) {
+		t.Errorf("UpgradeSummary lacks the runbook or the line:\n%s", summary)
 	}
 }
 
+// runPrepare runs PrepareUpgrade's script with home as HOME, and with gcloud
+// and go stubbed: go records its arguments in ~/go-args.
+func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
+	t.Helper()
+	bin := t.TempDir()
+	for name, body := range map[string]string{
+		"gcloud": "#!/bin/sh\n",
+		"go":     "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/go-args\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // Pre-built images take their version from the tag in the record, so the
-// hand-over moves new.yaml to the new tag and clears any VERSION that would
-// override it, and a rollback needs nothing from the shell.
+// set-up moves new.yaml to the new tag, and the hand-over sets the release the
+// runbook builds worker images from and clears any VERSION that would
+// override the tag; a rollback needs nothing from the shell.
 func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
-	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+	records, home := t.TempDir(), t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
 	st.ImageRepo, st.ImageTag = testImageRepo, "v0.6.1@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
 	st.InstalledVersion = "v0.6.0"
-	cmds := b.UpgradeCommands(st, "/trees/old", "/trees/new")
-	if !slices.Contains(cmds, `sed -i.bak "s/^  tag: .*/  tag: v0.6.1/" new.yaml`) || !slices.Contains(cmds, "unset VERSION") {
-		t.Errorf("pre-built commands:\n%s", strings.Join(cmds, "\n"))
+	record, err := RecordPath(st)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if summary := b.UpgradeSummary(st, "/trees/old", "/trees/new"); strings.Contains(summary, "export VERSION") {
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("images:\n  repo: "+testImageRepo+"\n  tag: v0.6.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPrepare(t, b.PrepareUpgrade(st, "/trees/old", "/trees/new"), home); err != nil {
+		t.Fatalf("set-up: %v\n%s", err, out)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "\n  tag: v0.6.1\n") {
+		t.Errorf("new.yaml should name the new tag:\n%s", got)
+	}
+	if line := b.UpgradeShellLine(st); line != "cd ~/ate-upgrade/new && export NEW_RELEASE=v0.6.1 && unset VERSION" {
+		t.Errorf("pre-built hand-over line: %s", line)
+	}
+	if summary := b.UpgradeSummary(st); strings.Contains(summary, "export VERSION") {
 		t.Errorf("a pre-built hand-over should not export a version:\n%s", summary)
 	}
 }

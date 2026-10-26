@@ -1445,7 +1445,7 @@ func typeText(t *testing.T, app *App, text string) {
 
 // TestDryRunUpgradeEndToEnd walks the upgrade track: welcome (upgrade) →
 // doctor → the cluster named and its API server read → images (the release)
-// → fetch (dry-run) → complete. Nothing in GCP is touched, and the new
+// → fetch, then set up ~/ate-upgrade on request (dry-run) → complete. The new
 // version is the release the images step offers.
 func TestDryRunUpgradeEndToEnd(t *testing.T) {
 	t.Setenv("ATE_RECORD_DIR", t.TempDir())
@@ -1487,10 +1487,17 @@ func TestDryRunUpgradeEndToEnd(t *testing.T) {
 		t.Fatalf("images step did not record the release: %+v", st)
 	}
 	plan := app.cur.(*upgradePlanScreen)
-	if !plan.comp.ok() {
-		t.Fatalf("dry-run fetch did not finish: failed=%v blocked=%q", plan.comp.failed, plan.blocked)
+	if !plan.fetch.ok() {
+		t.Fatalf("dry-run fetch did not finish: failed=%v blocked=%q", plan.fetch.failed, plan.blocked)
 	}
-	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "mkdir ~/ate-upgrade") {
+	if view := app.View(); !strings.Contains(view, "Press [enter] to set up ~/ate-upgrade") || strings.Contains(view, snapshot.RunbookURL) {
+		t.Errorf("after the fetch, the plan should offer the set-up and no hand-over yet:\n%s", view)
+	}
+	press("enter") // set up ~/ate-upgrade
+	if plan.prepare == nil || !plan.prepare.ok() {
+		t.Fatalf("dry-run set-up did not finish: %+v", plan.prepare)
+	}
+	if view := app.View(); !strings.Contains(view, snapshot.RunbookURL) || !strings.Contains(view, "export NEW_RELEASE="+testImageTag) {
 		t.Errorf("plan view lacks the hand-over:\n%s", view)
 	}
 	press("enter")
@@ -1629,7 +1636,7 @@ func TestUpgradeTrackRefusesAnUnsupportedUpgrade(t *testing.T) {
 
 	app := walk(t, testImageTag)
 	plan := app.cur.(*upgradePlanScreen)
-	if plan.blocked == "" || plan.comp != nil {
+	if plan.blocked == "" || plan.fetch != nil {
 		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", testImageTag, plan.blocked)
 	}
 	if view := app.View(); !strings.Contains(view, "the version it runs") {
@@ -1813,7 +1820,7 @@ func TestBackFromCompleteClearsCompleted(t *testing.T) {
 	press("enter", "enter", "enter") // the installed cluster is read
 	press("enter")                   // pre-built images
 	typeReleaseImages(t, app)
-	press("enter") // the plan
+	press("enter", "enter") // the plan: set up ~/ate-upgrade, then finish
 	if app.mach.Current() != state.Complete || !app.Completed {
 		t.Fatalf("expected the upgrade to be prepared: %v completed=%v", app.mach.Current(), app.Completed)
 	}

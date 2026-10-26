@@ -174,9 +174,8 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		return
 	}
 	if st.Upgrade {
-		installedDir, nextDir := b.UpgradeTrees(deps.UpgradeDir, st)
 		fmt.Println(theme.Good.Render("Upgrade prepared."))
-		fmt.Println(b.UpgradeSummary(st, installedDir, nextDir))
+		fmt.Println(b.UpgradeSummary(st))
 		if deps.LogPath != "" {
 			fmt.Printf("\n  log        %s\n", deps.LogPath)
 		}

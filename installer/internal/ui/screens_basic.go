@@ -97,7 +97,7 @@ func (s *welcomeScreen) View(w int) string {
 	tracks := []struct{ name, desc, note string }{
 		{"Quickstart (recommended)", "Sensible defaults; you pick the project, zone, and cluster.", ""},
 		{"Advanced", "Also configure machine type, network, bucket, and image registry.", ""},
-		{"Upgrade an installed cluster", "Fetch the trees and set up upstream's upgrade runbook from the\ncluster's ate-setup record. Nothing in GCP is touched.",
+		{"Upgrade an installed cluster", "Fetch the trees and set up upstream's upgrade runbook from the\ncluster's ate-setup record. Nothing on the cluster changes.",
 			// The runbook's table of supported upgrades, which the plan step
 			// enforces.
 			"From 1.0, upgrades a cluster to a later patch release or to the\nnext minor release."},

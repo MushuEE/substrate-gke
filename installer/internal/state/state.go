@@ -70,10 +70,11 @@ var Order = []Step{
 }
 
 // UpgradeOrder is the flow for upgrading a cluster this installer set up. It
-// touches nothing in GCP: it reads the cluster's install record, asks where
-// the new version comes from with the same images step an install uses,
-// fetches the two source trees upstream's runbook runs from, and records the
-// new version. The upgrade itself is upstream's docs/upgrade.md.
+// changes nothing on the cluster: it reads the installed version off the
+// cluster, asks where the new version comes from with the same images step an
+// install uses, fetches the two source trees upstream's runbook runs from, and
+// sets up ~/ate-upgrade the way the runbook does. The upgrade itself is
+// upstream's docs/upgrade.md.
 var UpgradeOrder = []Step{
 	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
