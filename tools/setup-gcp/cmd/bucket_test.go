@@ -16,8 +16,11 @@ package cmd
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 
+	"cloud.google.com/go/iam"
 	"cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 )
 
@@ -32,6 +35,9 @@ func TestValidateBucketFlags(t *testing.T) {
 		}, nil
 	}
 
+	tooLong := strings.Repeat("b", 57)
+	tooLongErr := `bucket name "` + tooLong + `" is too long: the asset bucket "` + tooLong + `-assets" would have 64 characters, and GCS allows 63`
+
 	tests := []struct {
 		name string
 		cfg  Config
@@ -41,6 +47,15 @@ func TestValidateBucketFlags(t *testing.T) {
 			name: "missing bucket name",
 			cfg:  Config{ProjectID: "test-project"},
 			want: "--name is required",
+		},
+		{
+			name: "bucket name too long for the asset bucket",
+			cfg:  Config{ProjectID: "test-project", BucketName: tooLong},
+			want: tooLongErr,
+		},
+		{
+			name: "longest bucket name the asset bucket allows",
+			cfg:  Config{ProjectID: "test-project", BucketName: strings.Repeat("b", 56)},
 		},
 		{
 			name: "missing project id",
@@ -82,5 +97,85 @@ func TestValidateBucketFlags(t *testing.T) {
 				t.Errorf("validateBucketFlags() = %q; want %q", err.Error(), tt.want)
 			}
 		})
+	}
+}
+
+// grantsOf returns the bucket grants for member.
+func grantsOf(cfg *Config, member string) []bucketGrant {
+	var got []bucketGrant
+	for _, g := range bucketGrants(cfg) {
+		if g.member == member {
+			got = append(got, g)
+		}
+	}
+	return got
+}
+
+// TestBucketGrantsPerMember pins what each member may reach: atelet reads
+// the asset bucket only, and the transfer account, like ate-api-server, may
+// read and write the snapshot bucket only.
+func TestBucketGrantsPerMember(t *testing.T) {
+	cfg := &Config{ProjectID: "proj", ProjectNumber: "123", BucketName: "snaps", TransferGSAName: DefaultTransferGSAName}
+	atelet := workloadIdentityPrincipal(cfg, "atelet")
+	transfer := "serviceAccount:ate-snapshot-transfer@proj.iam.gserviceaccount.com"
+	for _, tc := range []struct {
+		member string
+		want   []bucketGrant
+	}{
+		{atelet, []bucketGrant{{bucket: "snaps-assets", member: atelet, role: "roles/storage.objectViewer"}}},
+		{transfer, []bucketGrant{
+			{bucket: "snaps", member: transfer, role: "roles/storage.objectAdmin"},
+			{bucket: "snaps", member: transfer, role: "roles/storage.bucketViewer"},
+		}},
+	} {
+		if got := grantsOf(cfg, tc.member); !slices.Equal(got, tc.want) {
+			t.Errorf("grants for %s = %v, want %v", tc.member, got, tc.want)
+		}
+	}
+}
+
+// With --atelet-snapshot-access, atelet keeps the snapshot bucket roles that
+// Substrate releases up to v0.5.0 need, on top of read on the asset bucket.
+func TestAteletSnapshotAccessKeepsSnapshotBucketRoles(t *testing.T) {
+	cfg := &Config{ProjectID: "proj", ProjectNumber: "123", BucketName: "snaps", AteletSnapshotAccess: true}
+	atelet := workloadIdentityPrincipal(cfg, "atelet")
+	want := []bucketGrant{
+		{bucket: "snaps-assets", member: atelet, role: "roles/storage.objectViewer"},
+		{bucket: "snaps", member: atelet, role: "roles/storage.objectAdmin"},
+		{bucket: "snaps", member: atelet, role: "roles/storage.bucketViewer"},
+	}
+	if got := grantsOf(cfg, atelet); !slices.Equal(got, want) {
+		t.Errorf("atelet bucket grants = %v, want %v", got, want)
+	}
+}
+
+// policyMembers returns the members of the unconditional bindings of role.
+func policyMembers(policy *iam.Policy3, role string) []string {
+	var members []string
+	for _, b := range policy.Bindings {
+		if b.GetCondition() == nil && b.GetRole() == role {
+			members = append(members, b.GetMembers()...)
+		}
+	}
+	return members
+}
+
+func TestAddGrantsOnlyTouchesTheNamedBucket(t *testing.T) {
+	cfg := &Config{ProjectID: "proj", ProjectNumber: "123", BucketName: "snaps"}
+	member := func(sa string) string {
+		return "principal://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/proj.svc.id.goog/subject/ns/ate-system/sa/" + sa
+	}
+	policy := &iam.Policy3{}
+	if !addGrants(policy, "snaps-assets", bucketGrants(cfg)) {
+		t.Fatal("addGrants on the asset bucket added nothing")
+	}
+	if got := policyMembers(policy, "roles/storage.objectViewer"); !slices.Equal(got, []string{member("atelet")}) {
+		t.Errorf("objectViewer members = %v, want only atelet", got)
+	}
+	if got := policyMembers(policy, "roles/storage.objectAdmin"); len(got) != 0 {
+		t.Errorf("objectAdmin members on the asset bucket = %v, want none", got)
+	}
+	if addGrants(policy, "snaps-assets", bucketGrants(cfg)) {
+		t.Error("a second addGrants added bindings the policy already has")
 	}
 }

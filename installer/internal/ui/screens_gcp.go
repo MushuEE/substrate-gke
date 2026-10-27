@@ -67,8 +67,12 @@ type projValidMsg struct {
 	missing []gcp.RequiredPermission
 	permErr error
 	// docker are the docker checks that failed, when the install builds an
-	// image with docker; see dockerProblem.
-	docker []failedCheck
+	// image with docker; see dockerProblem. dockerRegistry is the registry
+	// they checked, and dockerGuessed says its host came from the zone field
+	// rather than a registry the user typed; see projectScreen.dockerRegistry.
+	docker         []failedCheck
+	dockerRegistry string
+	dockerGuessed  bool
 	// channel is why GKE would refuse the new-cluster version on the chosen
 	// channel, or ""; see channelProblem. versionWrong says the version is
 	// the field to fix, and channelPair is the pair that was checked.
@@ -138,6 +142,12 @@ type projectScreen struct {
 	// by it. Reset on any edit, like the others, so changing the zone (or
 	// anything else) checks again.
 	channelAcked string
+	// dockerAcked is the guessed registry whose docker problem has been
+	// shown, so the next submit with the same registry proceeds even if the
+	// checks still fail. The guess can be wrong: connecting an existing
+	// cluster in another region changes the host, and provision checks the
+	// final one before bootstrap starts. Reset on any edit, like the others.
+	dockerAcked string
 }
 
 // submitTimeout bounds a submit's checks as a whole. A healthy run takes a
@@ -400,7 +410,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	if st.CreatesArtifactRepository() {
 		repositoryPermissions = gcp.RepositoryPermissions
 	}
-	registry := s.dockerRegistry(&st)
+	registry, guessed := s.dockerRegistry(&st)
 	s.checkingDocker = registry != ""
 	// Only the advanced track can change the version or channel, so only it
 	// pays for asking GKE whether they go together. Empty fields mean the
@@ -427,7 +437,7 @@ func (s *projectScreen) submit() tea.Cmd {
 	projectNumber := s.projectNumber
 	return func() tea.Msg {
 		defer cancel()
-		msg := projValidMsg{owner: s, seq: seq, channelPair: pair}
+		msg := projValidMsg{owner: s, seq: seq, channelPair: pair, dockerRegistry: registry, dockerGuessed: guessed}
 		// Each submit re-reads ADC: after a PERMISSION_DENIED panel the
 		// user may have run `gcloud auth application-default login` as
 		// someone else. The probes in this submit still share one fetch.
@@ -516,25 +526,31 @@ func (s *projectScreen) inputSetup(pid string) state.Setup {
 	return st
 }
 
-// dockerRegistry selects checks for a known build destination. The default AR
-// destination waits for cluster selection, which may change its region.
-func (s *projectScreen) dockerRegistry(st *state.Setup) string {
+// dockerRegistry is the registry the docker checks run against, or "" when
+// the install builds nothing with docker. guessed reports that it is the
+// default Artifact Registry repository, whose host comes from the zone field:
+// connecting an existing cluster on the next screen sets the zone to that
+// cluster's location, which may be in another region. A failure on a guessed
+// host is advisory, and provision checks the final host before bootstrap.
+func (s *projectScreen) dockerRegistry(st *state.Setup) (registry string, guessed bool) {
 	if s.deps.DryRun || s.deps.Builder == nil {
-		return ""
+		return "", false
 	}
 	if !s.deps.Builder.BuildsWithDocker(st) {
-		return ""
+		return "", false
 	}
-	if st.CreatesArtifactRepository() {
-		return ""
-	}
-	return st.BuildRepository()
+	return st.BuildRepository(), st.CreatesArtifactRepository()
 }
 
+// guessedDockerNote follows dockerProblem when the registry's host came from
+// the zone field; see projectScreen.dockerRegistry.
+const guessedDockerNote = "\nThis host comes from the zone above. If the next step connects a cluster in another region, provision checks that region's host instead. Submit again to continue anyway."
+
 // dockerProblem renders the docker checks that failed. Unlike a permission
-// problem it cannot be waved through: nothing outside this machine is going
-// to fix it, and the build it blocks runs only after the control plane is
-// applied.
+// problem it cannot be waved through for a known registry: nothing outside
+// this machine is going to fix it, and the build it blocks runs only after the
+// control plane is applied. The exception is a registry guessed from the zone
+// field (see projectScreen.dockerRegistry), which provision checks again.
 func dockerProblem(failed []failedCheck, retryKey string) string {
 	var b strings.Builder
 	b.WriteString("This substrate builds its envoy-dataplane image with docker buildx, and docker is not ready:\n")
@@ -544,7 +560,7 @@ func dockerProblem(failed []failedCheck, retryKey string) string {
 			fmt.Fprintf(&b, "    fix: %s\n", f.res.Fix)
 		}
 	}
-	fmt.Fprintf(&b, "Fix them, then press [%s] to check again. Or set ATE_ATENET_DATAPLANE=agentgateway before starting the installer, which builds nothing with docker.", retryKey)
+	fmt.Fprintf(&b, "Fix them, then press [%s] to check again.", retryKey)
 	return b.String()
 }
 
@@ -833,8 +849,12 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 			s.errText = apiProblem(pid)
 			return nil
 		}
-		if len(m.docker) > 0 {
+		if len(m.docker) > 0 && !(m.dockerGuessed && s.dockerAcked == m.dockerRegistry) {
 			s.errText = dockerProblem(m.docker, "enter")
+			if m.dockerGuessed {
+				s.dockerAcked = m.dockerRegistry
+				s.errText += guessedDockerNote
+			}
 			return nil
 		}
 		if m.probeErr != nil && !s.probeAcked {
@@ -915,6 +935,7 @@ func (s *projectScreen) Update(msg tea.Msg) tea.Cmd {
 		s.probeAcked = false
 		s.permAcked = false
 		s.channelAcked = ""
+		s.dockerAcked = ""
 		var cmd tea.Cmd
 		s.fields[s.focus].input, cmd = s.fields[s.focus].input.Update(msg)
 		return cmd

@@ -469,13 +469,8 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 	}
 	_, stagedSteps := b.NextSteps(st)
 	joined := strings.Join(stagedSteps, "\n")
-	for _, want := range []string{
-		"kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template counter-microvm",
-		"ate-target-actor: ate-demo-counter-microvm/my-counter-1",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
-		}
+	if want := "kubectl ate create actor my-counter-1 -a ate-demo-counter-microvm --template counter-microvm"; !strings.Contains(joined, want) {
+		t.Errorf("staged micro-VM NextSteps missing %q:\n%s", want, joined)
 	}
 
 	// On a pre-built install (even if ImageTag carries a digest), DeployDemo
@@ -486,8 +481,8 @@ func TestDeployDemoMicroVMAndNextSteps(t *testing.T) {
 	prebuilt.ImageTag = "v0.1.0-gke.1@sha256:" + strings.Repeat("ab", 32)
 	prebuiltScript := b.DeployDemo(prebuilt, "counter").Argv[2]
 	for _, want := range []string{
-		"ATEOM_REF=" + ShellQuote(ReleaseRepo+"/ateom-microvm:v0.1.0-gke.1"),
-		"COUNTER_REF=" + ShellQuote(ReleaseRepo+"/counter:v0.1.0-gke.1"),
+		"ATEOM_REF=" + ShellQuote(testImageRepo+"/ateom-microvm:v0.1.0-gke.1"),
+		"COUNTER_REF=" + ShellQuote(testImageRepo+"/counter:v0.1.0-gke.1"),
 		`ATEOM_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${ATEOM_REF}")`,
 		`COUNTER_DIGEST=$(go run github.com/google/go-containerregistry/cmd/crane@v0.21.7 digest "${COUNTER_REF}")`,
 		`sed -i.bak "s|ko://github.com/agent-substrate/substrate/cmd/ateom-microvm|${ATEOM_REF}@${ATEOM_DIGEST}|g"`,
@@ -602,7 +597,7 @@ func TestMicroVMDemoPrefersAteSetup(t *testing.T) {
 	prebuilt := prebuiltSetup(t)
 	prebuilt.SandboxClass = state.SandboxMicroVM
 	prebuilt.MicroVMDeployed = true
-	imageFlags := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
+	imageFlags := " --image-repo " + ShellQuote(testImageRepo) + " --image-tag " + ShellQuote(testImageTag)
 
 	for name, tc := range map[string]struct {
 		st           *state.Setup
@@ -679,7 +674,7 @@ func TestMicroVMDemoBranchesOnTheTree(t *testing.T) {
 	}{
 		{"source, new tree", source, true, "go run ./cmd/ate-setup deploy demo counter-microvm KO=unset", viaAteSetup},
 		{"source, old tree", source, false, "install-ate.sh --deploy-demo-counter-microvm", viaInstallAte},
-		{"pre-built, new tree", prebuilt, true, "go run ./cmd/ate-setup deploy demo counter-microvm --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion + " KO=unset", viaAteSetup},
+		{"pre-built, new tree", prebuilt, true, "go run ./cmd/ate-setup deploy demo counter-microvm --image-repo " + testImageRepo + " --image-tag " + testImageTag + " KO=unset", viaAteSetup},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -863,6 +858,13 @@ func TestFetchedRequiresTheCompletionMarker(t *testing.T) {
 		t.Error("a marked checkout must count as fetched")
 	}
 }
+
+// testImageRepo and testImageTag stand in for a published image set. No
+// registry is published by default, so a pre-built install always names one.
+const (
+	testImageRepo = "registry.example.com/substrate"
+	testImageTag  = "v0.6.0"
+)
 
 func testSetup(t *testing.T) *state.Setup {
 	t.Helper()
@@ -1253,7 +1255,7 @@ func TestDeployAteSystemCredentialProvider(t *testing.T) {
 // finding out once the cluster is half installed.
 func TestCheckImageTag(t *testing.T) {
 	ok := []string{
-		ReleaseVersion,
+		testImageTag,
 		"v0.1.0@sha256:" + strings.Repeat("ab", 32), // the digest is not part of the version
 		"40ca1ce6",
 		"1",
@@ -1287,7 +1289,7 @@ func prebuiltSetup(t *testing.T) *state.Setup {
 	st := state.NewSetup()
 	st.ProjectID = "acme"
 	st.ProjectNumber = "42"
-	st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+	st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 	if err := st.ApplyProjectDefaults(); err != nil {
 		t.Fatalf("ApplyProjectDefaults: %v", err)
 	}
@@ -1313,7 +1315,7 @@ func TestPrebuiltEnvDropsTheBuildVariables(t *testing.T) {
 	// VERSION names the atelet DaemonSet and labels the nodes, so it has to be
 	// the tag the images came from — not b.Version, which describes the
 	// checkout, and not whatever the caller's shell happens to export.
-	if want := "VERSION=" + ReleaseVersion; !slices.Contains(env, want) {
+	if want := "VERSION=" + testImageTag; !slices.Contains(env, want) {
 		t.Errorf("pre-built env missing %q: %v", want, env)
 	}
 	// The rest of the dev-env contract still applies: the checkout is fetched
@@ -1333,8 +1335,8 @@ func TestPrebuiltDeployPassesTheImageFlags(t *testing.T) {
 
 	// A tag is user input, so the script quotes it; Display is prose the user
 	// reads, so it does not.
-	wantArgv := " --image-repo " + ShellQuote(ReleaseRepo) + " --image-tag " + ShellQuote(ReleaseVersion)
-	wantDisplay := " --image-repo " + ReleaseRepo + " --image-tag " + ReleaseVersion
+	wantArgv := " --image-repo " + ShellQuote(testImageRepo) + " --image-tag " + ShellQuote(testImageTag)
+	wantDisplay := " --image-repo " + testImageRepo + " --image-tag " + testImageTag
 	for _, spec := range []execx.Spec{b.DeployAteSystem(st), b.DeployDemo(st, "counter")} {
 		if !strings.Contains(spec.Argv[2], wantArgv) {
 			t.Errorf("%s argv missing the image flags:\n%s", spec.Label, spec.Argv[2])
@@ -1498,7 +1500,8 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
 		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
 		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName)} {
+		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
+		"export SNAPSHOT_TRANSFER_GSA_NAME=" + ShellQuote(TransferGSAName), "run . create iam --project-id " + ShellQuote(st.ProjectID)} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
 		}
@@ -1507,8 +1510,9 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 		t.Errorf("the rollback block should carry only what changes:\n%s", summary)
 	}
 	// Every indented line is meant to be pasted into a shell, the cd lines
-	// into the trees just fetched.
-	var script []string
+	// into the trees just fetched. go and gcloud are stubbed: the lines that
+	// call them act on a GCP project.
+	script := []string{"go() { :; }", "gcloud() { :; }"}
 	for _, line := range strings.Split(summary, "\n") {
 		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
 			script = append(script, strings.TrimSpace(line))
@@ -1528,7 +1532,7 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
 	st.KoDockerRepo = ""
-	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", ReleaseRepo, "v0.1.0"
+	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", testImageRepo, "v0.1.0"
 
 	installed := InstalledExports(st)
 	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "export KO_DOCKER_REPO") {
@@ -1540,8 +1544,8 @@ func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
 	}
 }
 
-// Only a build from source of a tree with the envoy-dataplane image, under the
-// envoy router, runs docker. Asking anyone else for docker would block
+// Only a build from source of a tree with the envoy-dataplane image runs
+// docker. Asking anyone else for docker would block
 // installs that never touch it.
 func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "")
@@ -1554,16 +1558,7 @@ func TestBuildsWithDockerOnlyForAnEnvoyBuildFromSource(t *testing.T) {
 	if !b.BuildsWithDocker(st) {
 		t.Error("a source build of a tree with envoy-dataplane must need docker")
 	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "envoy")
-	if !b.BuildsWithDocker(st) {
-		t.Error("ATE_ATENET_DATAPLANE=envoy is the default, so it must still need docker")
-	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
-	if b.BuildsWithDocker(st) {
-		t.Error("the agentgateway router builds nothing with docker")
-	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "")
-	st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.2.0"
+	st.ImageRepo, st.ImageTag = testImageRepo, "v0.2.0"
 	if b.BuildsWithDocker(st) {
 		t.Error("a pre-built install must not need docker")
 	}
@@ -1608,7 +1603,7 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			st.Zone, st.ArtifactRegistryRepository = "europe-west4-a", "build-images"
 			st.KoDockerRepo = tc.override
 			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = ReleaseRepo, ReleaseVersion
+				st.ImageRepo, st.ImageTag = testImageRepo, testImageTag
 			}
 			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), tc.managed)
 			b.SetupGCP = "/src/substrate-gke/tools/setup-gcp"
@@ -1622,11 +1617,11 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 			if !tc.prebuilt && (!slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) || !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.registry))) {
 				t.Errorf("build and upgrade must use %q", tc.registry)
 			}
-			steps := 7
+			steps := 8
 			if tc.create {
 				steps++
 			}
-			if slices.Contains(spec.SimLines, "Step 2/8: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
+			if slices.Contains(spec.SimLines, "Step 2/9: Creating Artifact Registry repository...") != tc.create || !slices.Contains(spec.SimLines, fmt.Sprintf("Step %d/%d: Creating Monitoring Dashboards...", steps, steps)) {
 				t.Errorf("unexpected bootstrap output: %v", spec.SimLines)
 			}
 			if strings.Contains(b.CleanupCommand(st), "--delete-repository") != tc.create {
@@ -1643,7 +1638,7 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 		{"explicit default", "ate-images", "", "", " --delete-repository"},
 		{"custom repository", "build-images", "", "", " --repository 'build-images' --delete-repository"},
 		{"custom registry", "build-images", "registry.example.com/shared", "", ""},
-		{"prebuilt images", "build-images", "", ReleaseRepo, ""},
+		{"prebuilt images", "build-images", "", testImageRepo, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := testSetup(t)
@@ -1671,11 +1666,11 @@ func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := testSetup(t)
 			st.Upgrade = true
-			st.InstalledCommit, st.InstalledVersion = Commit, ReleaseVersion
-			st.InstalledImageRepo, st.InstalledImageTag = ReleaseRepo, ReleaseVersion
+			st.InstalledCommit, st.InstalledVersion = Commit, testImageTag
+			st.InstalledImageRepo, st.InstalledImageTag = testImageRepo, testImageTag
 			st.Zone, st.ArtifactRegistryRepository, st.KoDockerRepo = tc.zone, tc.repository, tc.registry
 			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = ReleaseRepo, "v0.3.0"
+				st.ImageRepo, st.ImageTag = testImageRepo, "v0.3.0"
 			}
 			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: tc.envoy})
@@ -1716,9 +1711,132 @@ printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_
 					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
 				}
 			}
+			// Every upgrade creates the snapshot transfer service account,
+			// under the new release's exports.
+			koRepo := st.BuildRepository()
+			if tc.prebuilt {
+				koRepo = ""
+			}
+			want += "go|" + next + "|-C " + b.SetupGCP + " run . create iam --project-id acme --bucket " + st.BucketName + "|" + koRepo + "\n"
 			if string(data) != want {
 				t.Fatalf("preparation calls = %q, want %q", data, want)
 			}
 		})
+	}
+}
+
+// The fetch row names the revision the run uses: the pin, a commit the images
+// step chose instead, or a tree the user supplied, which is not fetched.
+func TestFetchLabelNamesTheRevision(t *testing.T) {
+	pinned := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if got, want := pinned.FetchLabel(), "Fetch the pinned substrate checkout ("+ShortCommit()+")"; got != want {
+		t.Errorf("pinned: %q, want %q", got, want)
+	}
+	selected := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	selected.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("b", 40)})
+	if got, want := selected.FetchLabel(), "Fetch the selected substrate checkout (bbbbbbbbbbbb)"; got != want {
+		t.Errorf("selected commit: %q, want %q", got, want)
+	}
+	fork := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	fork.UseSource(Revision{Repo: "https://github.com/someone/substrate.git", Commit: Commit})
+	if got := fork.FetchLabel(); !strings.HasPrefix(got, "Fetch the selected substrate checkout") {
+		t.Errorf("the pinned commit from another repository: %q, want the selected label", got)
+	}
+	root := t.TempDir()
+	local := NewBuilder(root, false)
+	if got, want := local.FetchLabel(), "Use the substrate checkout at "+root; got != want {
+		t.Errorf("local tree: %q, want %q", got, want)
+	}
+}
+
+// The allowlist is the demo drivers' identities, then the caller's, trimmed
+// and without duplicates, because ate-setup reads one value.
+func TestIngressAllowedSPIFFEIDsAppendsTheCallers(t *testing.T) {
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", "")
+	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, DemoClientSPIFFEIDs) {
+		t.Errorf("without the variable: %v, want the demo drivers %v", got, DemoClientSPIFFEIDs)
+	}
+	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", " "+frontend+", ,"+DemoClientSPIFFEIDs[0])
+	want := append(slices.Clone(DemoClientSPIFFEIDs), frontend)
+	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, want) {
+		t.Errorf("with the variable: %v, want %v", got, want)
+	}
+	if got := IngressAllowlistSummary(); !strings.Contains(got, "plus 1 from ATE_INGRESS_ALLOWED_SPIFFE_IDS") {
+		t.Errorf("summary = %q", got)
+	}
+}
+
+// The control-plane deploy and the upgrade hand-over both carry the joined
+// list, replacing whatever the caller exported.
+func TestDeployAndUpgradeCarryTheIngressAllowlist(t *testing.T) {
+	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", frontend)
+	joined := strings.Join(append(slices.Clone(DemoClientSPIFFEIDs), frontend), ",")
+	st := testSetup(t)
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_INGRESS_ALLOWED_SPIFFE_IDS="+joined) {
+		t.Errorf("deploy env lacks the joined allowlist: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_INGRESS_ALLOWED_SPIFFE_IDS="+ShellQuote(joined)) {
+		t.Errorf("upgrade exports lack the joined allowlist:\n%s", exports)
+	}
+}
+
+// The Envoy router admits only allowlisted clients, so the tour cannot curl an
+// actor from the user's machine; a tree with the counter driver runs such a
+// client.
+func TestNextStepsFollowTheRouter(t *testing.T) {
+	st := testSetup(t)
+	root := fakeCheckout(t)
+	b := NewBuilder(root, false)
+
+	lead, demo := b.NextSteps(st)
+	joined := strings.Join(demo, "\n")
+	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
+		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
+	}
+	if note := b.RouterNote(); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
+		t.Errorf("Envoy router note = %q", note)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, CounterDriverDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if lead, demo = b.NextSteps(st); lead != "" || !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter -l app=counter-driver -f"}) {
+		t.Errorf("Envoy with the driver: lead %q, demo %v", lead, demo)
+	}
+	st.SandboxClass, st.MicroVMDeployed = state.SandboxMicroVM, true
+	if _, demo = b.NextSteps(st); !slices.Equal(demo, []string{"kubectl logs -n ate-demo-counter-microvm -l app=counter-driver -f"}) {
+		t.Errorf("micro-VM with the driver: demo %v", demo)
+	}
+}
+
+// From v0.6.0 ate-setup needs a cluster-wide snapshot location. The install's
+// own bucket is the one setup-gcp grants access to, so both the deploy and the
+// upgrade hand-over name its root.
+func TestDeployAndUpgradeCarryTheSnapshotLocation(t *testing.T) {
+	st := testSetup(t)
+	st.BucketName = "ate-snapshots-acme-c-z"
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "SNAPSHOT_LOCATION=gs://ate-snapshots-acme-c-z/") {
+		t.Errorf("deploy env lacks the snapshot location: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export SNAPSHOT_LOCATION='gs://ate-snapshots-acme-c-z/'") {
+		t.Errorf("upgrade exports lack the snapshot location:\n%s", exports)
+	}
+}
+
+// The control-plane deploy and the upgrade hand-over name the envoy dataplane,
+// whatever the caller exported.
+func TestDeployAndUpgradeNameTheEnvoyDataplane(t *testing.T) {
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
+	st := testSetup(t)
+	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
+	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_ATENET_DATAPLANE=envoy") {
+		t.Errorf("deploy env lacks ATE_ATENET_DATAPLANE=envoy: %v", env)
+	}
+	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_ATENET_DATAPLANE='envoy'") {
+		t.Errorf("upgrade exports lack the envoy dataplane:\n%s", exports)
 	}
 }

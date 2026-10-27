@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -50,43 +51,49 @@ const (
 	// install skips the build, not the tree, because ate-setup reads the
 	// manifests from source.
 	//
-	// The step offers this as the manifest revision behind the pre-built
-	// images, so it has to be the commit ReleaseVersion was built from. The
-	// build-from-source track offers its repository's live HEAD instead and
-	// only falls back here for --dry-run, which resolves nothing.
+	// The images step offers this on both tracks: as the revision a build
+	// from source starts at, and as the manifest revision behind pre-built
+	// images, which have to have been built from it.
 	//
-	// It is a release commit rather than a commit of main, because that is
-	// what the released images are built from: the commit upstream's v0.4.0
-	// tag names, which is also the head of its release-0.4 branch,
-	// ReleaseVersion being the GKE build of it.
+	// It is a release commit rather than a commit of main: the commit
+	// upstream's v0.6.0 tag names, which is also the head of its release-0.6
+	// branch.
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "756c2a53741121e728f4cc3066c8a19e575b4919"
+	Commit = "d3f2363590a11b2f50489971985ba033b4c9eff7"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
 	// when checking Go before the first fetch.
 	MinGoVersion = "1.27.0"
-
-	// ReleaseRepo publishes the GKE Substrate release images, and is the
-	// registry the wizard offers by default. It is read-only to installs:
-	// images are pulled from it and never pushed to it, which is why
-	// installing pre-built images leaves KO_DOCKER_REPO out of the picture
-	// entirely rather than pointing it here.
-	ReleaseRepo = "us-docker.pkg.dev/gke-substrate-release/substrate"
-
-	// ReleaseVersion is the tag the wizard offers by default, published from
-	// Commit — the two move together, because the manifests read out of that
-	// tree have to match the images this tag names.
-	//
-	// Both of these are defaults, not limits: the wizard takes any registry
-	// and tag the user types, so a team installing its own published build
-	// never has to fall back to building from source. It asks such a team for
-	// a manifest revision as well, since only this registry is published
-	// alongside a tree known to match.
-	ReleaseVersion = "v0.4.0-gke.0"
 )
+
+// There is no default image registry. The GKE release registry
+// (us-docker.pkg.dev/gke-substrate-release/substrate) is deprecated and has no
+// images for Commit, and no registry replaces it yet, so a pre-built install
+// names the registry and tag of images published for Commit, or for whatever
+// commit it gives the images step. A registry is read-only to an install:
+// images are pulled from it and never pushed to it, which is why installing
+// pre-built images leaves KO_DOCKER_REPO out of the picture.
+
+// TransferGSAName is the snapshot transfer service account's name: what
+// setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given
+// as SNAPSHOT_TRANSFER_GSA_NAME. ate-setup has no default for it, and from
+// Substrate v0.6.0 refuses to deploy ate-api-server on GKE without it.
+const TransferGSAName = "ate-snapshot-transfer"
+
+// SnapshotLocation is ate-api-server's cluster-wide snapshot location: the
+// root of the install's snapshot bucket, as upstream's
+// hack/ate-dev-env.sh.example sets it. From Substrate v0.6.0, ate-setup
+// refuses to deploy without one unless the PerTemplateSnapshotLocation
+// preview gate is on (agent-substrate/substrate#2544); older trees ignore
+// it. A caller's SNAPSHOT_LOCATION is not honored, for the same reason
+// BUCKET_NAME is not: setup-gcp grants the transfer account access to this
+// bucket alone, so any other location would fail at the first suspend.
+func SnapshotLocation(st *state.Setup) string {
+	return "gs://" + st.BucketName + "/"
+}
 
 // ShortCommit is Commit abbreviated for display.
 func ShortCommit() string { return shorten(Commit) }
@@ -373,7 +380,15 @@ func (b *Builder) KubectlAteInstall() string {
 // before, so bumping Commit means re-checking this function. Nothing here is
 // executed by the wizard, so no test will catch the drift — the user is the
 // one who runs it.
-func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string) {
+//
+// The Envoy router serves only TLS and admits only clients that present an
+// allowlisted pod certificate (see RouterNote), so a curl from the user's
+// machine is refused. A tree with the counter demo's driver
+// (agent-substrate/substrate#3178) runs such a client in the demo namespace,
+// and the tour reads its logs; without one, the tour stops at creating the
+// actor. lead is "" when there is nothing to run before the demo; it is kept
+// for the callers, which print it when set.
+func (b *Builder) NextSteps(st *state.Setup) (lead string, demo []string) {
 	// The atespace and ActorTemplate the counter demo creates. `ate-setup
 	// deploy demo counter`, `ate-setup deploy demo counter-microvm`, and
 	// `hack/install-ate.sh --deploy-demo-counter-microvm` all create the
@@ -385,15 +400,41 @@ func (b *Builder) NextSteps(st *state.Setup) (portForward string, demo []string)
 		demoTemplate = "counter-microvm"
 	}
 
+	if b.hasCounterDriver() {
+		return "", []string{"kubectl logs -n " + demoAtespace + " -l app=counter-driver -f"}
+	}
+
 	installAte := `go install ./cmd/kubectl-ate    # run inside your substrate checkout`
 	if b.Managed {
 		installAte = b.KubectlAteInstall()
 	}
-	return "kubectl port-forward -n ate-system svc/atenet-router 8000:80", []string{
-		installAte,
-		"kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate,
-		`curl -X POST -H "ate-target-actor: ` + demoAtespace + `/my-counter-1" http://localhost:8000/`,
-	}
+	return "", []string{installAte, "kubectl ate create actor my-counter-1 -a " + demoAtespace + " --template " + demoTemplate}
+}
+
+// CounterDriverDir is the counter demo's driver, an in-cluster client of the
+// Envoy router (agent-substrate/substrate#3178).
+const CounterDriverDir = "demos/counter/driver"
+
+// hasCounterDriver reports whether the fetched tree has CounterDriverDir. By
+// the time next steps are shown, the demo step has fetched the tree.
+func (b *Builder) hasCounterDriver() bool {
+	info, err := os.Stat(filepath.Join(b.Root, CounterDriverDir))
+	return err == nil && info.IsDir()
+}
+
+// RouterNote explains how to reach actors through the Envoy router, which
+// admits only allowlisted clients.
+func (b *Builder) RouterNote() string {
+	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
+		IngressAllowlistSummary() + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
+		" and the substrate-gke README."
+}
+
+// RouterAuthURL is upstream's documentation of ingress client authentication
+// at the commit this install runs.
+func (b *Builder) RouterAuthURL() string {
+	return "https://github.com/agent-substrate/substrate/blob/" + b.commit +
+		"/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization"
 }
 
 // ShellQuote renders s as a single-quoted POSIX shell word. Go's %q produces a
@@ -462,6 +503,21 @@ func (b *Builder) UseSource(rev Revision) {
 	}
 }
 
+// FetchLabel is the checklist label for the fetch preamble of the in-tree
+// steps. It names the revision the run uses, so a run the images step moved
+// off the pin does not claim to fetch the pinned checkout. A tree the user
+// supplied is used as it is, with nothing fetched.
+func (b *Builder) FetchLabel() string {
+	switch {
+	case !b.Managed:
+		return "Use the substrate checkout at " + b.Root
+	case b.repo == RepoURL && b.commit == Commit:
+		return "Fetch the pinned substrate checkout (" + shorten(b.commit) + ")"
+	default:
+		return "Fetch the selected substrate checkout (" + shorten(b.commit) + ")"
+	}
+}
+
 // CleanupCommand preserves the cluster and repository targets used by this install.
 func (b *Builder) CleanupCommand(st *state.Setup) string {
 	command := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName)
@@ -476,8 +532,8 @@ func (b *Builder) CleanupCommand(st *state.Setup) string {
 
 // BuildsWithDocker reports whether deploying the control plane runs `docker
 // buildx build --push` against st.KoDockerRepo, which ate-setup does for the
-// envoy-dataplane image. That takes the envoy router, ate-setup's default
-// unless ATE_ATENET_DATAPLANE names another, and a tree that has the image.
+// envoy-dataplane image. Every install deploys the envoy router (see
+// Dataplane), so that takes a tree that has the image.
 //
 // ko reads gcloud's credentials by itself; docker reads only its own config.
 // So a host where every ko image pushes can still fail here, after the
@@ -490,9 +546,6 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	if st.Prebuilt() {
 		return false
 	}
-	if !EnvoyRouter() {
-		return false
-	}
 	if !b.Managed {
 		// A tree the user supplied is built as it stands, whatever revision
 		// the images step recorded.
@@ -501,12 +554,27 @@ func (b *Builder) BuildsWithDocker(st *state.Setup) bool {
 	return b.envoy
 }
 
-// EnvoyRouter reports whether ate-setup deploys the envoy router, its default
-// unless ATE_ATENET_DATAPLANE names another. Only the envoy router is built
-// with docker.
-func EnvoyRouter() bool {
-	router := os.Getenv("ATE_ATENET_DATAPLANE")
-	return router == "" || router == "envoy"
+// Dataplane is the atenet dataplane every install deploys, and the only one
+// the GKE installer supports. ate-setup also offers agentgateway through
+// ATE_ATENET_DATAPLANE, but it has no support policy for GKE installs, so the
+// doctor refuses it (see UnsupportedDataplane) and the control-plane deploy
+// names envoy explicitly.
+const Dataplane = "envoy"
+
+// UnsupportedDataplane returns the caller's ATE_ATENET_DATAPLANE when it names
+// a dataplane other than Dataplane, and "" when it is unset or Dataplane.
+func UnsupportedDataplane() string {
+	if v := os.Getenv("ATE_ATENET_DATAPLANE"); v != "" && v != Dataplane {
+		return v
+	}
+	return ""
+}
+
+// dataplaneEnv passes Dataplane to ate-setup, replacing any value the caller
+// exported. The doctor has already refused another value; this keeps a run
+// that skipped it on envoy too.
+func dataplaneEnv() []string {
+	return []string{"ATE_ATENET_DATAPLANE=" + Dataplane}
 }
 
 // HasEnvoyDockerfile reports whether the Substrate tree at root builds the
@@ -559,6 +627,11 @@ func (b *Builder) env(st *state.Setup) []string {
 		"ENABLE_DATAPLANE_V2=" + strconv.FormatBool(dataplaneV2),
 		"NODE_MACHINE_TYPE=" + st.MachineType,
 		"BUCKET_NAME=" + st.BucketName,
+		// Bootstrap creates the account under this name and ate-setup hands
+		// it to ate-api-server's credential exchange, so both read it from
+		// here. Trees that predate the account ignore it.
+		"SNAPSHOT_TRANSFER_GSA_NAME=" + TransferGSAName,
+		"SNAPSHOT_LOCATION=" + SnapshotLocation(st),
 		"KUBECTL_CONTEXT=",
 		"NO_DEV_ENV=1",
 	}
@@ -732,10 +805,11 @@ func (b *Builder) Bootstrap(st *state.Setup) execx.Spec {
 	}
 	phases = append(phases,
 		"Creating GKE Cluster...",
-		"Creating GCS Bucket for snapshots...",
+		"Creating GCS buckets for snapshots and micro-VM assets...",
 		"Granting GKE Node permissions...",
 		"Granting Atelet permissions...",
-		"Creating IAM policy bindings for bucket...",
+		"Creating the snapshot transfer service account...",
+		"Creating IAM policy bindings for the buckets...",
 		"Creating Monitoring Dashboards...",
 	)
 	lines := b.fetchSimLines()
@@ -773,15 +847,15 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		// only part a pre-built one does not have, so a dry run of one must
 		// not print it. Nothing replaces it: pulling a digest is silent.
 		sim = append(sim,
-			"Building github.com/agent-substrate/substrate/cmd/ate-api-server",
-			"Building github.com/agent-substrate/substrate/cmd/atelet",
+			"Building go.ate.dev/substrate/cmd/ate-api-server",
+			"Building go.ate.dev/substrate/cmd/atelet",
 		)
 	}
 	return execx.Spec{
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree("go run ./cmd/ate-setup deploy ate-system" + argv),
-		Env:     append(b.env(st), credentialProviderEnv()...),
+		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -813,6 +887,57 @@ func credentialProviderEnv() []string {
 		return nil
 	}
 	return []string{"ATE_CREDENTIAL_PROVIDER=" + defaultCredentialProvider}
+}
+
+// DemoClientSPIFFEIDs are the identities of the counter demos' driver pods,
+// which call their actors through the ingress router
+// (agent-substrate/substrate#3178). The pod identity signer issues
+// spiffe://cluster.local/ns/<namespace>/sa/<service-account>, with the trust
+// domain fixed; ate-setup fixes the demo namespaces, and the drivers run as
+// their namespace's default service account. Both are listed whatever demo
+// the run picks, because the allowlist is set when the control plane is
+// deployed, before the sandbox and demo steps.
+var DemoClientSPIFFEIDs = []string{
+	"spiffe://cluster.local/ns/ate-demo-counter/sa/default",
+	"spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default",
+}
+
+// IngressAllowedSPIFFEIDs is the Envoy ingress router's client allowlist:
+// DemoClientSPIFFEIDs, then the caller's comma-separated
+// ATE_INGRESS_ALLOWED_SPIFFE_IDS, without duplicates. ate-setup reads the
+// variable as one value and does not combine it with anything, so the
+// installer joins the two lists itself. From Substrate v0.6.0, ate-setup
+// refuses to deploy the Envoy router without an allowlist; older trees ignore
+// it.
+func IngressAllowedSPIFFEIDs() []string {
+	ids := slices.Clone(DemoClientSPIFFEIDs)
+	for _, id := range strings.Split(os.Getenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS"), ",") {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// callerSPIFFEIDs is how many of IngressAllowedSPIFFEIDs came from the caller.
+func callerSPIFFEIDs() int {
+	return len(IngressAllowedSPIFFEIDs()) - len(DemoClientSPIFFEIDs)
+}
+
+// IngressAllowlistSummary describes the allowlist for the control-plane
+// screen: the demo drivers, and how many identities the caller added.
+func IngressAllowlistSummary() string {
+	if n := callerSPIFFEIDs(); n > 0 {
+		return fmt.Sprintf("the counter demo drivers, plus %d from ATE_INGRESS_ALLOWED_SPIFFE_IDS", n)
+	}
+	return "the counter demo drivers (add your own callers with ATE_INGRESS_ALLOWED_SPIFFE_IDS)"
+}
+
+// ingressAllowlistEnv passes IngressAllowedSPIFFEIDs to ate-setup. It
+// replaces any ATE_INGRESS_ALLOWED_SPIFFE_IDS the caller exported, whose IDs
+// it already includes.
+func ingressAllowlistEnv() []string {
+	return []string{"ATE_INGRESS_ALLOWED_SPIFFE_IDS=" + strings.Join(IngressAllowedSPIFFEIDs(), ",")}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in

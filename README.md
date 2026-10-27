@@ -6,7 +6,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 > **New here?** Run `make dry-run` first — it walks the entire wizard without touching GCP, so you can see every prompt before committing to anything.
 
 > [!WARNING]
-> **This creates billable GCP resources.** A completed install provisions a GKE cluster, a snapshot bucket, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
+> **This creates billable GCP resources.** A completed install provisions a GKE cluster, snapshot and micro-VM asset buckets, a snapshot transfer service account, IAM bindings, monitoring dashboards, and (for some source builds) an Artifact Registry repository. See [Tearing down](#tearing-down) to remove them — the wizard prints the exact cleanup command at the end of every install.
 
 ![The installer's welcome screen](docs/screenshots/welcome.svg)
 
@@ -15,6 +15,7 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 - [Quickstart](#quickstart)
 - [What the installer does](#what-the-installer-does)
 - [Sandbox runtimes](#sandbox-runtimes)
+- [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router)
 - [Where the images come from](#where-the-images-come-from)
 - [How Substrate itself is obtained](#how-substrate-itself-is-obtained)
 - [Logs](#logs)
@@ -65,12 +66,12 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | # | Step | What happens |
 |---|---|---|
 | 1 | ✅ Check your setup | Probes `gcloud`, application-default credentials, Go, `kubectl`, `gke-gcloud-auth-plugin`, network reachability, `git`, and Docker with buildx and registry credentials — with copy-paste fixes for anything missing. Docker is only needed to build Substrate 0.2 or later from source, so those checks only warn here |
-| 2 | 🖼️ Choose your images | Pre-built images (the default), or build your own from a commit — see [Where the images come from](#where-the-images-come-from) |
+| 2 | 🖼️ Choose your images | Pre-built images from a registry you name, or build your own from a commit (the pin by default) — see [Where the images come from](#where-the-images-come-from) |
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
-| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot bucket, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off |
-| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster had GKE's managed Filestore driver on, provision has already turned it off ([agent-substrate/substrate#2357](https://github.com/agent-substrate/substrate/issues/2357)), so skipping this leaves that cluster with none |
+| 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
+| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router's client allowlist is set here too; see [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router). Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
+| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
 | 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
 | 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
 | 10 | 🎬 Deploy a demo workload *(optional)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
@@ -120,12 +121,13 @@ Substrate runs each actor inside a sandbox, and step 9 chooses which kind.
 cluster-wide `gvisor-default` SandboxConfig as part of turning Substrate on.
 
 **Micro-VM** is opt-in, because its sandbox binaries — cloud-hypervisor, virtiofsd, the
-guest kernel, the guest rootfs and the base kata config — are fetched from the snapshot
-bucket at boot rather than baked into the worker image. Step 9 (`Choose your sandbox
-runtime`) reports whether the cluster you selected has a KVM-capable node pool, and on
-choosing Micro-VM it runs upstream's `hack/install-microvm-deps.sh --install` to assemble
-those five assets, upload them under `kata-assets/` in the snapshot bucket, and apply a
-cluster-wide `SandboxConfig` named `microvm` that points at them.
+guest kernel, the guest rootfs and the base kata config — are fetched from GCS at boot
+rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
+whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
+runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
+upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
+`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
+points at them.
 
 Actor templates must then name it explicitly:
 
@@ -185,21 +187,86 @@ resources automatically; if you want to drop micro-VM without tearing anything e
 run `NO_DEV_ENV=1 hack/install-microvm-deps.sh --delete` against the cluster's kube
 context (the staged assets in `kata-assets/` remain inert in the bucket).
 
+## Reaching actors through the ingress router
+
+Requests reach actors through `atenet-router` in `ate-system`. From Substrate v0.6.0
+the default router is Envoy, which serves only TLS and admits only clients that
+present a pod certificate whose SPIFFE ID is on its allowlist. Any listed client may
+reach any actor. `ate-setup` will not deploy the Envoy router without an allowlist.
+
+A client's ID comes from the namespace and service account its pod runs as:
+
+```
+spiffe://cluster.local/ns/<namespace>/sa/<service-account>
+```
+
+The trust domain `cluster.local` is fixed by Substrate's pod identity signer, so an ID
+is known before the install. Clients are the workloads that send requests to actors,
+usually your application's frontend or backend service. `kubectl ate` talks to the API
+server, not the router, and needs no entry; neither do Substrate's own components.
+
+The installer sets the allowlist when it turns Substrate on (step 6):
+
+- It always lists the counter demos' driver pods,
+  `spiffe://cluster.local/ns/ate-demo-counter/sa/default` and
+  `spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default`. Both are listed
+  because the sandbox runtime and demo are chosen after step 6. This lets any pod
+  running as the default service account in those two namespaces reach any actor.
+- It appends whatever you export in `ATE_INGRESS_ALLOWED_SPIFFE_IDS`
+  (comma-separated) before starting the installer, for your own clients:
+
+  ```bash
+  export ATE_INGRESS_ALLOWED_SPIFFE_IDS=spiffe://cluster.local/ns/shop/sa/frontend
+  make run
+  ```
+
+To add a client after the install, redeploy the router with the full list. Each deploy
+replaces the list rather than adding to it. From the substrate checkout, with the
+cluster's environment set (the installer's upgrade hand-over prints it):
+
+```bash
+go run ./cmd/ate-setup deploy atenet \
+  --credential-provider='{"name":"k8s.io"}' \
+  --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-demo-counter/sa/default,spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default,spiffe://cluster.local/ns/shop/sa/frontend
+```
+
+A client in the cluster mounts its certificate with a `podCertificate` projected
+volume and the router's serving CA with a `clusterTrustBundle` one; upstream's
+[router README](https://github.com/agent-substrate/substrate/blob/main/cmd/atenet/internal/router/README.md#ingress-client-authentication-and-authorization)
+shows both.
+
+For the demo's next steps, a Substrate tree whose counter demo has a driver pod ([agent-substrate/substrate#3178](https://github.com/agent-substrate/substrate/pull/3178))
+reads its logs, `kubectl logs -n ate-demo-counter -l app=counter-driver -f`, which show
+it calling the actor through the router. v0.6.0 has no driver, so the tour stops at
+creating the actor.
+
+The installer deploys the Envoy router only. `ate-setup` also offers agentgateway
+through `ATE_ATENET_DATAPLANE`, but it has no support policy for GKE installs, so the
+setup check (step 1) fails if `ATE_ATENET_DATAPLANE` is set to anything other than
+`envoy`.
+
 ## Where the images come from
 
 The images step chooses between two ways of getting the Substrate control-plane images. Both name a commit of [`agent-substrate/substrate`](https://github.com/agent-substrate/substrate) — `ate-setup` reads deployment manifests from that source tree either way. The repository is fixed; the commit is yours to choose.
 
-| | **Pre-built images** *(default)* | **Build from source** |
+| | **Pre-built images** | **Build from source** |
 |---|---|---|
-| **You provide** | Registry, tag, and commit — all pre-filled, all overridable | A revision: branch, tag, or full commit SHA |
-| **Default value** | `v0.4.0-gke.0` at `us-docker.pkg.dev/gke-substrate-release/substrate`, pinned to upstream's [`v0.4.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.4.0) tag | Repo's current HEAD, resolved live via `git ls-remote` |
+| **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
+| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag | The pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
-| **Best for** | Just getting Substrate running | A branch or commit with no published images |
+| **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
+
+> [!NOTE]
+> No registry of pre-built images is published at the moment. The GKE release
+> registry (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated
+> and has no images for v0.6.0; a replacement will be published in a different
+> registry. Until then, a pre-built install needs images you or your team
+> published, and building from source is the way to install the pin.
 
 For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
 > [!IMPORTANT]
-> If you point at a custom registry/tag, **move the commit with it.** Only the release registry is guaranteed to match its tags — images from anywhere else need the commit they were built from, or they'll run behind manifests from a different Substrate. The wizard warns you as soon as the registry or tag changes.
+> **The commit has to be the one the images were built from.** `ate-setup` reads the manifests from it, so images built from another commit run behind manifests from a different Substrate. The commit field starts at the pin, which only fits images built from the pin.
 
 <details>
 <summary><strong>Other details worth knowing</strong> (click to expand)</summary>
@@ -260,7 +327,7 @@ The installed tree is fetched at the commit the running API server reports it wa
 
 ## Tearing down
 
-An install creates **billable resources**: the GKE cluster, the snapshot bucket, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
+An install creates **billable resources**: the GKE cluster, the snapshot and micro-VM asset buckets, IAM bindings, monitoring dashboards, and any image repository provisioned for a source build.
 
 ```bash
 ./tools/cleanup-gcp --project <project> --cluster <cluster> --location <zone> --bucket <bucket>
@@ -303,7 +370,7 @@ make substrate-pin-check  # verify MinGoVersion against upstream's go.mod — ru
 > [!WARNING]
 > Skipping `make substrate-pin-check` after a bump lets the preflight doctor pass while the install fails mid-bootstrap.
 
-Bump `ReleaseVersion` and `Commit` together when a newer release is published — `Commit` has to be the manifest revision those images were actually built from. All three (`Commit`, `ReleaseRepo`, `ReleaseVersion`) are defaults, not limits: the wizard accepts any registry, tag, or revision, and the build-from-source track never uses `Commit` at all.
+`Commit` is a default, not a limit: the images step offers it as the revision to build from and as the commit pre-built images were built from, and accepts any other revision. There is no default image registry or tag to bump with it.
 
 ## Glossary
 

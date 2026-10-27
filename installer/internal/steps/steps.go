@@ -46,13 +46,14 @@ func containsAny(subs ...string) func(string) bool {
 }
 
 // Bootstrap tracks the idempotent phases of `setup-gcp bootstrap`,
-// preceded by the pinned substrate fetch this step pays for on a cold cache.
+// preceded by the substrate fetch this step pays for on a cold cache.
+// fetchLabel names that fetch; see snapshot.Builder.FetchLabel.
 //
 // The cluster phase is the one whose work depends on the cluster, so its label
 // does too. setup-gcp logs "Creating GKE Cluster" either way, but on an
 // existing cluster it creates nothing: it either checks the cluster, or turns
 // the beta APIs on in a control-plane update the user was just told to expect.
-func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistItem {
+func Bootstrap(fetchLabel string, artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistItem {
 	clusterStep := "Check the existing GKE cluster"
 	switch {
 	case clusterIsNew:
@@ -61,7 +62,7 @@ func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistI
 		clusterStep = "Turn on the beta PodCertificate APIs (control-plane update)"
 	}
 	items := []ChecklistItem{
-		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Enable required GCP APIs", contains("Enabling required APIs")},
 	}
 	if artifactRegistry {
@@ -69,10 +70,11 @@ func Bootstrap(artifactRegistry, clusterIsNew, enableBetaAPIs bool) []ChecklistI
 	}
 	return append(items,
 		ChecklistItem{clusterStep, contains("Creating GKE Cluster")},
-		ChecklistItem{"Create the GCS snapshot bucket", contains("Creating GCS Bucket for snapshots")},
+		ChecklistItem{"Create the GCS snapshot and asset buckets", contains("Creating GCS buckets for snapshots")},
 		ChecklistItem{"Grant GKE node permissions", contains("Granting GKE Node permissions")},
 		ChecklistItem{"Grant atelet Workload Identity permissions", contains("Granting Atelet permissions")},
-		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for bucket")},
+		ChecklistItem{"Create the snapshot transfer service account", contains("Creating the snapshot transfer service account")},
+		ChecklistItem{"Bind bucket IAM policies", contains("Creating IAM policy bindings for the buckets")},
 		ChecklistItem{"Create Cloud Monitoring dashboards", contains("Creating Monitoring Dashboards")},
 	)
 }
@@ -88,7 +90,7 @@ func Deploy(prebuilt bool) []ChecklistItem {
 	}
 	if !prebuilt {
 		items = append(items, ChecklistItem{
-			"Build control-plane images from source (ko)", containsAny("Building github.com/", "Publishing "),
+			"Build control-plane images from source (ko)", containsAny("Building github.com/", "Building go.ate.dev/", "Publishing "),
 		})
 	}
 	return append(items, ChecklistItem{
@@ -107,17 +109,18 @@ func FilestoreCSI() []ChecklistItem {
 }
 
 // MicroVMDeps tracks the three phases of `install-microvm-deps.sh --install`,
-// preceded by the same pinned fetch the other in-tree steps pay for.
+// preceded by the same fetch the other in-tree steps pay for, named by
+// fetchLabel.
 //
 // The assemble row matches either outcome: a first run builds the asset set,
 // and a later one finds it already in bin/microvm-assets and skips. Both mean
 // the phase is done, and leaving the row unlit on the fast path would read as
 // a stall on the step's slowest phase.
-func MicroVMDeps() []ChecklistItem {
+func MicroVMDeps(fetchLabel string) []ChecklistItem {
 	return []ChecklistItem{
-		{"Fetch the pinned substrate checkout", containsAny(snapshot.FetchLine, snapshot.CachedLine)},
+		{fetchLabel, containsAny(snapshot.FetchLine, snapshot.CachedLine)},
 		{"Assemble the micro-VM asset set", containsAny("Assembling micro-VM assets", "Assets already present", "re-assembling")},
-		{"Upload assets to the snapshot bucket (kata-assets/)", contains("Uploading assets to gs://")},
+		{"Upload assets to GCS (kata-assets/)", contains("Uploading assets to gs://")},
 		{"Apply the cluster-wide microvm SandboxConfig", contains("Applying microvm SandboxConfig")},
 	}
 }

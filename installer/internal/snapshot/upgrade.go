@@ -143,6 +143,9 @@ func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) 
 		}
 		block("Before building images for this upgrade, prepare the default registry:", commands...)
 	}
+	block("Before deploying Substrate v0.6.0 or later, create the snapshot transfer service account\nits credential exchange impersonates, with its grants. It only adds bindings, so it is\nsafe to run for an older release:",
+		fmt.Sprintf("SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket %s",
+			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.BucketName)))
 	block("A rollback runs the same commands from the installed release, with its version:",
 		append([]string{"cd " + ShellQuote(installedDir)}, strings.Split(InstalledExports(st), "\n")...)...)
 	return strings.TrimRight(sb.String(), "\n")

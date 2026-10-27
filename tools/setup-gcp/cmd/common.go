@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -55,7 +56,11 @@ type Config struct {
 	BootDiskProvisionedIOPS           int64
 	BootDiskProvisionedThroughputMBps int64
 
-	BucketName                 string
+	BucketName           string
+	AteletSnapshotAccess bool
+	// TransferGSAName is the name of the snapshot transfer service account
+	// (SNAPSHOT_TRANSFER_GSA_NAME), the variable ate-setup also reads.
+	TransferGSAName            string
 	ArtifactRegistryRepository string
 	CreateArtifactRepository   bool
 
@@ -129,4 +134,23 @@ func getEnv[T getEnvType](key string, fallback T) T {
 	}
 
 	return ret.(T)
+}
+
+// assetBucketName is the bucket for micro-VM sandbox assets.
+// hack/install-microvm-deps.sh in agent-substrate/substrate derives the same
+// name.
+func (c *Config) assetBucketName() string {
+	return c.BucketName + "-assets"
+}
+
+// addAteletSnapshotAccessFlag registers --atelet-snapshot-access on cmd.
+// See bucketGrants for what it grants and which Substrate revisions need it.
+func addAteletSnapshotAccessFlag(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&cfg.AteletSnapshotAccess, "atelet-snapshot-access", getEnv("ATELET_SNAPSHOT_ACCESS", true), "Grant atelet storage.objectAdmin on the project and objectAdmin and bucketViewer on the snapshot bucket. Substrate releases up to v0.5.0 need it; revisions with per-actor snapshot credentials do not. Turn off with --atelet-snapshot-access=false [env: ATELET_SNAPSHOT_ACCESS]")
+}
+
+// workloadIdentityPrincipal is the IAM member for the ate-system Kubernetes
+// service account ksa under GKE Workload Identity Federation.
+func workloadIdentityPrincipal(cfg *Config, ksa string) string {
+	return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/ate-system/sa/%s", cfg.ProjectNumber, cfg.ProjectID, ksa)
 }

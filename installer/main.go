@@ -234,9 +234,9 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	section("Teardown, when you're done")
 	note("Delete the Substrate control plane, keeping the cluster:")
 	command(teardown)
-	resources := "snapshot bucket, IAM bindings, and dashboards"
+	resources := "snapshot and asset buckets, snapshot transfer service account, IAM bindings, and dashboards"
 	if st.CreatesArtifactRepository() {
-		resources = "snapshot bucket, IAM bindings, dashboards, and the image repository"
+		resources = "snapshot and asset buckets, snapshot transfer service account, IAM bindings, dashboards, and the image repository"
 	}
 	note("Delete everything this install created in GCP — the cluster, the", resources+":")
 	command(b.CleanupCommand(st))
@@ -245,10 +245,15 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 	// install leaves a written copy behind.
 	if st.DemoDeployed {
 		section("Next steps — try the " + ui.DemoName(st) + " demo")
-		portForward, demo := b.NextSteps(st)
-		command(portForward)
+		lead, demo := b.NextSteps(st)
+		if lead != "" {
+			command(lead)
+		}
 		for _, cmd := range demo {
 			command(cmd)
+		}
+		if routerNote := b.RouterNote(); routerNote != "" {
+			note(routerNote)
 		}
 	}
 }

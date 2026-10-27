@@ -200,6 +200,20 @@ func Checks(snapshotRoot string, managed bool) []Check {
 			},
 		},
 		{
+			// ate-setup offers agentgateway as well, but the GKE installer has
+			// no support policy for it, so a run that asks for it stops here
+			// rather than installing something nobody can support.
+			Key: "atenet-dataplane", Name: "Atenet dataplane", Fatal: true,
+			Run: func(ctx context.Context) Result {
+				if v := snapshot.UnsupportedDataplane(); v != "" {
+					return Result{Fail,
+						fmt.Sprintf("ATE_ATENET_DATAPLANE=%s is not supported; this installer deploys the %s dataplane only", v, snapshot.Dataplane),
+						"unset ATE_ATENET_DATAPLANE"}
+				}
+				return Result{Pass, snapshot.Dataplane, ""}
+			},
+		},
+		{
 			Key: "microvm-tools", Name: "Micro-VM asset tools", Fatal: false,
 			Run: func(ctx context.Context) Result {
 				if missing := MissingMicroVMTools(); len(missing) > 0 {
@@ -229,7 +243,7 @@ func Checks(snapshotRoot string, managed bool) []Check {
 		},
 	}
 	// Check credential configuration now; verify access after selecting a registry.
-	if snapshot.EnvoyRouter() && (managed || snapshot.HasEnvoyDockerfile(snapshotRoot)) {
+	if managed || snapshot.HasEnvoyDockerfile(snapshotRoot) {
 		for _, c := range DockerChecks("") {
 			checks = append(checks, warnOnly(c))
 		}

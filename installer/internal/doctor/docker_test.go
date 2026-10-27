@@ -251,7 +251,10 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 		{"empty entries", `{"credHelpers":{"host":""},"auths":{"host":{}}}`, Warn},
 		{"helper", `{"credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
 		{"store", `{"credsStore":"desktop"}`, Warn},
-		{"login", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
+		{"store with an Artifact Registry helper", `{"credsStore":"desktop","credHelpers":{"us-west1-docker.pkg.dev":"gcloud"}}`, Pass},
+		{"login", `{"auths":{"europe-west4-docker.pkg.dev":{"auth":"dXNlcjpwYXNz"}}}`, Pass},
+		{"gcr.io helpers only", `{"credHelpers":{"gcr.io":"gcloud","us.gcr.io":"gcloud"}}`, Warn},
+		{"login elsewhere only", `{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`, Warn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -275,6 +278,9 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 				if tc.name == "store" && !strings.Contains(res.Detail, "before a registry is chosen") {
 					t.Errorf("credential store: %s", res.Detail)
 				}
+				if tc.name == "gcr.io helpers only" && !strings.Contains(res.Detail, "only for gcr.io, us.gcr.io") {
+					t.Errorf("gcr.io helpers: the warning should name the hosts it found: %s", res.Detail)
+				}
 				if res.Status == Warn && (res.Fix == "" || !strings.Contains(res.Detail, "only needed to build")) {
 					t.Errorf("warning needs a fix and source-build qualifier: %+v", res)
 				}
@@ -288,9 +294,8 @@ func TestDoctorChecksCredentialConfiguration(t *testing.T) {
 	}
 }
 
-// The project step's advice for a docker problem is to use agentgateway,
-// which builds nothing with docker; the doctor must not then ask for it. Nor
-// for a tree of the user's own that has no envoy-dataplane to build.
+// A tree of the user's own that has no envoy-dataplane to build needs no
+// docker, so the doctor must not ask for it.
 func TestChecksLeaveOutDockerWhenNothingIsBuiltWithIt(t *testing.T) {
 	hasDocker := func(root string, managed bool) bool {
 		for _, c := range Checks(root, managed) {
@@ -309,11 +314,6 @@ func TestChecksLeaveOutDockerWhenNothingIsBuiltWithIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
-	if hasDocker(t.TempDir(), true) {
-		t.Error("agentgateway builds nothing with docker")
-	}
-	t.Setenv("ATE_ATENET_DATAPLANE", "envoy")
 	if hasDocker(t.TempDir(), false) {
 		t.Error("a supplied tree without the envoy Dockerfile builds nothing with docker")
 	}
@@ -337,5 +337,32 @@ func TestRunCLICountsDockerWarningsApart(t *testing.T) {
 	checks = append(checks, Check{Key: "gcloud", Name: "gcloud", Fatal: true, Run: fail})
 	if fatal, _ := RunCLI(context.Background(), checks); fatal != 1 {
 		t.Errorf("RunCLI = %d fatal, want 1", fatal)
+	}
+}
+
+// The installer supports the envoy dataplane only. Asking for another is a
+// fatal setup check; leaving it unset or naming envoy passes.
+func TestDoctorRefusesAnUnsupportedDataplane(t *testing.T) {
+	check := func() Result {
+		for _, c := range Checks(t.TempDir(), true) {
+			if c.Key == "atenet-dataplane" {
+				if !c.Fatal {
+					t.Fatal("the dataplane check must be fatal")
+				}
+				return c.Run(t.Context())
+			}
+		}
+		t.Fatal("doctor has no dataplane check")
+		return Result{}
+	}
+	for _, v := range []string{"", "envoy"} {
+		t.Setenv("ATE_ATENET_DATAPLANE", v)
+		if res := check(); res.Status != Pass {
+			t.Errorf("ATE_ATENET_DATAPLANE=%q: %+v, want Pass", v, res)
+		}
+	}
+	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
+	if res := check(); res.Status != Fail || !strings.Contains(res.Detail, "agentgateway") || !strings.Contains(res.Fix, "unset ATE_ATENET_DATAPLANE") {
+		t.Errorf("agentgateway: %+v, want Fail with the value and the fix", res)
 	}
 }

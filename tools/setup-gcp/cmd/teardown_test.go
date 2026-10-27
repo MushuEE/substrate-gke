@@ -36,7 +36,7 @@ case "$1 $2 $3" in
       echo "ERROR: (gcloud.artifacts.repositories.delete) NOT_FOUND: repository not found" >&2
       exit 1
     fi ;;
-  "monitoring dashboards list"|"projects remove-iam-policy-binding "*|"storage buckets "*|"storage rm "*|"container clusters delete"|"container node-pools delete") ;;
+  "monitoring dashboards list"|"projects remove-iam-policy-binding "*|"iam service-accounts delete"|"storage buckets "*|"storage rm "*|"container clusters delete"|"container node-pools delete") ;;
   *) echo "unexpected gcloud call: $*" >&2; exit 1 ;;
 esac
 `

@@ -252,6 +252,14 @@ func clusterExports(st *state.Setup) []string {
 		"export PROJECT_ID=" + ShellQuote(st.ProjectID),
 		"export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
 		"export CLUSTER_LOCATION=" + ShellQuote(st.Zone),
+		// Required by ate-setup from Substrate v0.6.0 on GKE, ignored before.
+		"export SNAPSHOT_TRANSFER_GSA_NAME=" + ShellQuote(TransferGSAName),
+		// Required by ate-setup from v0.6.0 on GKE, ignored before.
+		"export SNAPSHOT_LOCATION=" + ShellQuote(SnapshotLocation(st)),
+		// The only dataplane the installer supports; see Dataplane.
+		"export ATE_ATENET_DATAPLANE=" + ShellQuote(Dataplane),
+		// Required by ate-setup from v0.6.0 for the Envoy router.
+		"export ATE_INGRESS_ALLOWED_SPIFFE_IDS=" + ShellQuote(strings.Join(IngressAllowedSPIFFEIDs(), ",")),
 	}
 }
 

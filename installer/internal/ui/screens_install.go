@@ -50,7 +50,7 @@ type provisionDockerMsg struct {
 func newProvisionScreen(deps *Deps) *provisionScreen {
 	return &provisionScreen{
 		deps: deps,
-		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Setup.CreatesArtifactRepository(), deps.Setup.ClusterIsNew, deps.Setup.EnableBetaAPIs), deps.LogPath),
+		comp: newExecComp(deps.Runner, deps.Builder.Bootstrap(deps.Setup), steps.Bootstrap(deps.Builder.FetchLabel(), deps.Setup.CreatesArtifactRepository(), deps.Setup.ClusterIsNew, deps.Setup.EnableBetaAPIs), deps.LogPath),
 	}
 }
 
@@ -161,27 +161,21 @@ func (s *provisionScreen) View(w int) string {
 	case st.EnableBetaAPIs:
 		// The cluster screen has just told the user this update is coming,
 		// and it is rarely the only one. Bootstrap reconciles Workload
-		// Identity, managed OpenTelemetry and the Filestore CSI driver too,
-		// each its own control-plane update of about the same length; on a
-		// cluster it did not create, a run of forty minutes was measured.
+		// Identity and managed OpenTelemetry too, each its own control-plane
+		// update of about the same length; on a cluster it did not create, a
+		// run of forty minutes was measured.
 		b.WriteString(sub.Render(fmt.Sprintf(
 			"Turning on the beta PodCertificate APIs for %s: about ten minutes, and bootstrap may make other control-plane updates of the same length. Then the bucket, IAM, and dashboards.", st.ClusterName)) + "\n\n")
 	default:
 		b.WriteString(sub.Render(fmt.Sprintf(
 			"Cluster %s already exists. Bootstrap fills in the bucket, IAM, and dashboards, and updates the cluster only where it differs from what Substrate needs.", st.ClusterName)) + "\n\n")
 	}
-	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
-		// Said here, as it happens, rather than left for the Filestore step
-		// to mention afterward: by then the driver is already off, and a
-		// user who skips that step has none at all. Wrapped to the content
-		// width, or Bubble Tea's renderer cuts it at the edge.
-		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render(
-			"Bootstrap also turns off GKE's managed Filestore CSI driver on this cluster. Pods using Filestore volumes lose their driver until the Filestore step installs Substrate's.") + "\n\n")
-	}
 	if s.checkingDocker {
 		b.WriteString("Checking Docker and registry credentials...\n")
 	} else if s.dockerError != "" {
-		b.WriteString(theme.Bad.Render(s.dockerError))
+		// Wrapped to the content width, or Bubble Tea's renderer cuts the
+		// detail and fix lines at the edge.
+		b.WriteString(theme.Bad.Width(max(w-2, 20)).Render(s.dockerError))
 	} else {
 		b.WriteString(s.comp.view(w))
 	}
@@ -336,6 +330,7 @@ func (s *controlPlaneScreen) View(w int) string {
 		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
+	subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary() + "."
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 
@@ -436,7 +431,7 @@ func (s *sandboxScreen) Hints() []Hint {
 func (s *sandboxScreen) startMicroVMStage() tea.Cmd {
 	s.confirmingNoKVM = false
 	s.deps.Setup.SandboxClass = state.SandboxMicroVM
-	s.comp = newExecComp(s.deps.Runner, s.deps.Builder.InstallMicroVMDeps(s.deps.Setup), steps.MicroVMDeps(), s.deps.LogPath)
+	s.comp = newExecComp(s.deps.Runner, s.deps.Builder.InstallMicroVMDeps(s.deps.Setup), steps.MicroVMDeps(s.deps.Builder.FetchLabel()), s.deps.LogPath)
 	return s.comp.start()
 }
 
@@ -693,13 +688,13 @@ func (s *filestoreScreen) View(w int) string {
 	st := s.deps.Setup
 	skip := "[2] Skip — I'll configure storage drivers later"
 	if !st.ClusterIsNew && st.ClusterFilestoreAddon {
-		// Provision has already turned the managed driver off, so the usual
-		// note would describe something that has happened as something that
-		// might, and "skip" would hide that it leaves the cluster with no
-		// Filestore driver at all.
+		// The managed driver is on and may be serving workloads. Installing
+		// turns it off before Substrate's driver is up, so say that here;
+		// skipping leaves the managed driver as it is. Wrapped to the
+		// content width, or Bubble Tea's renderer cuts it at the edge.
 		b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render("Optional: install GCP Filestore CSI Driver configured for Substrate.") + "\n")
-		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("Provision already turned off GKE's managed Filestore CSI driver on this cluster. Skipping leaves it with no Filestore CSI driver.") + "\n\n")
-		skip = "[2] Skip — the cluster then has no Filestore CSI driver"
+		b.WriteString(theme.Warning.Width(max(w-2, 20)).Render("GKE's managed Filestore CSI driver is on for this cluster. Installing turns it off first, so pods using Filestore volumes lose their driver until Substrate's is running.") + "\n\n")
+		skip = "[2] Skip — keep GKE's managed Filestore CSI driver"
 	} else {
 		b.WriteString(theme.Subtle.Render("Optional: install GCP Filestore CSI Driver configured for Substrate.\nNote: This will disable the managed Filestore CSI driver if enabled.") + "\n\n")
 	}
@@ -1160,15 +1155,26 @@ func (s *completeScreen) View(w int) string {
 		b.WriteString("\n" + theme.Subtle.Render("Press [y] to run `kubectl get pods -n ate-system` and see it live.") + "\n")
 	}
 
-	portForward, demo := s.deps.Builder.NextSteps(st)
-	next := theme.Title.Render("Next steps") + "\n" +
-		theme.CommandLine.Render(portForward)
+	lead, demo := s.deps.Builder.NextSteps(st)
+	next := theme.Title.Render("Next steps")
+	if lead != "" {
+		next += "\n" + theme.CommandLine.Render(lead)
+	}
 	if st.DemoDeployed {
-		next += "\n" + theme.Subtle.Render("then, to try the "+DemoName(st)+" demo:")
+		intro := "then, to try the " + DemoName(st) + " demo:"
+		if lead == "" {
+			intro = "To try the " + DemoName(st) + " demo:"
+		}
+		next += "\n" + theme.Subtle.Render(intro)
 		for _, cmd := range demo {
 			next += "\n" + theme.CommandLine.Render(cmd)
 		}
 	}
-	b.WriteString("\n" + theme.AccentPanel.Width(min(w-4, 92)).Render(next))
+	panelWidth := min(w-4, 92)
+	if note := s.deps.Builder.RouterNote(); note != "" {
+		// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
+		next += "\n" + theme.Subtle.Width(max(panelWidth-4, 20)).Render(note)
+	}
+	b.WriteString("\n" + theme.AccentPanel.Width(panelWidth).Render(next))
 	return b.String()
 }
