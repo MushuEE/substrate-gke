@@ -268,10 +268,10 @@ func (b *Builder) UpgradeShellLine(st *state.Setup) string {
 }
 
 // versionWord renders a version as a shell word for a line the user pastes.
-// A version is a label value, which needs no quoting; anything else is quoted
+// A version is an image tag, which needs no quoting; anything else is quoted
 // rather than trusted.
 func versionWord(v string) string {
-	if labelValue.MatchString(v) {
+	if imageTag.MatchString(v) {
 		return v
 	}
 	return ShellQuote(v)

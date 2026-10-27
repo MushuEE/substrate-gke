@@ -1371,10 +1371,9 @@ func TestImagesScreenAcceptsAnOverriddenRegistry(t *testing.T) {
 	}
 }
 
-// A tag that cannot be a version has to be caught at the prompt: it becomes the
-// node label and the atelet DaemonSet suffix, and ate-setup refuses it after
+// A tag outside the image tag grammar has to be caught at the prompt, not once
 // the cluster has already been bootstrapped.
-func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
+func TestImagesScreenRejectsAMalformedTag(t *testing.T) {
 	app := testApp(t)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	pump(t, app, key("enter")) // welcome → doctor
@@ -1392,7 +1391,7 @@ func TestImagesScreenRejectsATagThatIsNotALabelValue(t *testing.T) {
 	pump(t, app, key("enter")) // submit
 
 	if app.mach.Current() != state.Images {
-		t.Fatalf("a tag that is not a label value must not advance: %v", app.mach.Current())
+		t.Fatalf("a malformed tag must not advance: %v", app.mach.Current())
 	}
 	if scr.errText == "" {
 		t.Error("no error was shown for the rejected tag")

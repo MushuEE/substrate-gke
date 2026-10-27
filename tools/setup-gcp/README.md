@@ -197,16 +197,6 @@ for the disk size, which GCE checks when it creates the nodes.
 `NODE_MACHINE_TYPE` was named `GVISOR_NODE_MACHINE_TYPE`. The old name still
 works and warns; rename it in your `.ate-dev-env.sh`.
 
-**Node version labels:** pool labels are the birth default for every node GKE
-creates later (autoscaling, auto-repair, node upgrades), and `setup-gcp` does
-not set `ate.dev/substrate-version` on the pool, so those nodes arrive
-unlabeled and run no dataplane pods (see the README's note on node version
-labels). Stamp the pool with
-`gcloud container node-pools update ... --node-labels=...` (list the existing
-labels first and carry them all over; the flag replaces the full set), and
-create additional pools with
-`--node-labels=ate.dev/substrate-version=<build version>`.
-
 **Node sysctls for high sandbox density (>800 sandboxes/node):** each awake
 actor sandbox creates its own network namespace, veth/tap pair, and inotify
 watches on the host kernel (even in multi-actor worker pods). Default COS

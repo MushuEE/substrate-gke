@@ -1634,10 +1634,9 @@ func (s *clusterScreen) View(w int) string {
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
 			theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))+"\n\n"+
 				"Re-running the install track against an installed cluster is unsupported\n"+
-				"and produces a broken, mixed-version cluster:\n"+
-				"  • Control plane deployments roll to the new commit immediately.\n"+
-				"  • atelet and worker pools remain pinned to the older version,\n"+
-				"    causing router contract mismatches (e.g. 421 Misdirected Request).\n\n"+
+				"and leaves a mixed-version cluster, out of the upgrade order:\n"+
+				"  • The control plane and atelet roll to the new commit at once.\n"+
+				"  • Worker pools stay on the older worker image.\n\n"+
 				theme.Title.Render("Supported paths forward:")+"\n"+
 				"  1. Upgrade this cluster: exit or restart the installer and choose\n"+
 				"     \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.\n\n"+

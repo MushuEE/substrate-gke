@@ -642,10 +642,10 @@ func (b *Builder) env(st *state.Setup) []string {
 		// VERSION is the image tag, not the checkout's commit. ate-setup
 		// falls back to the tag on its own, but VERSION wins over it and
 		// every spec inherits the caller's environment, so a developer who
-		// sourced an ate-dev-env.sh would otherwise name the atelet DaemonSet
-		// and label nodes after a version no installed image carries. Pinning
-		// it here keeps the label matching the image, and makes an upgrade a
-		// change of tag and nothing else.
+		// sourced an ate-dev-env.sh would otherwise have ate-setup record a
+		// version no installed image carries. Pinning it here keeps the
+		// record matching the image, and makes an upgrade a change of tag and
+		// nothing else.
 		return append(env, "VERSION="+imageVersion(st.ImageTag))
 	}
 	return append(env,
@@ -668,32 +668,26 @@ func imageVersion(tag string) string {
 	return v
 }
 
-// labelValue is the Kubernetes label-value grammar, which is the whole
-// constraint on an image tag here.
-var labelValue = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`)
+// imageTag is the OCI distribution grammar for an image tag.
+var imageTag = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
 
-// labelValueMaxLength mirrors k8s.io/apimachinery's validation constant. It is
-// restated rather than imported: the installer depends on no Kubernetes
-// libraries, and one integer is not worth the module graph.
-const labelValueMaxLength = 63
+// imageTagMaxLength is the longest tag that grammar allows.
+const imageTagMaxLength = 128
 
-// CheckImageTag reports whether a pre-built image tag can serve as the
-// Substrate version. That is the only thing constraining it: registries accept
-// far more than this, but the version becomes the ate.dev/substrate-version
-// node label and the atelet DaemonSet's name suffix, and ate-setup refuses a
-// version that is not a valid label value rather than silently sanitizing one.
+// CheckImageTag reports whether a pre-built image tag is one a registry can
+// hold. The tag doubles as the Substrate version ate-setup records, and a
+// malformed one would otherwise fail only once the install is under way.
 //
-// Checking here turns that refusal into a correctable prompt, for the same
+// Checking here turns that failure into a correctable prompt, for the same
 // reason the revision is resolved before the install starts rather than during
 // it.
 func CheckImageTag(tag string) error {
 	v := imageVersion(tag)
-	if len(v) > labelValueMaxLength {
-		return fmt.Errorf("%q is %d characters; a version can be at most %d, because it becomes a node label",
-			v, len(v), labelValueMaxLength)
+	if len(v) > imageTagMaxLength {
+		return fmt.Errorf("%q is %d characters; an image tag can be at most %d", v, len(v), imageTagMaxLength)
 	}
-	if !labelValue.MatchString(v) {
-		return fmt.Errorf("%q cannot be a Substrate version: it becomes the ate.dev/substrate-version node label, so it must be letters, digits, '.', '-', or '_', beginning and ending with a letter or digit", v)
+	if !imageTag.MatchString(v) {
+		return fmt.Errorf("%q is not an image tag: it must be letters, digits, '_', '.', or '-', and cannot begin with '.' or '-'", v)
 	}
 	return nil
 }

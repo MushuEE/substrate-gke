@@ -1250,9 +1250,8 @@ func TestDeployAteSystemCredentialProvider(t *testing.T) {
 	}
 }
 
-// The tag becomes the node label and the atelet DaemonSet suffix, so ate-setup
-// refuses one that is not a valid label value. Catching it at the prompt beats
-// finding out once the cluster is half installed.
+// A registry refuses a tag outside the image tag grammar. Catching it at the
+// prompt beats finding out once the cluster is half installed.
 func TestCheckImageTag(t *testing.T) {
 	ok := []string{
 		testImageTag,
@@ -1260,7 +1259,9 @@ func TestCheckImageTag(t *testing.T) {
 		"40ca1ce6",
 		"1",
 		"release_2026.09.02-rc1",
-		strings.Repeat("v", 63),
+		"v0.1.0-",
+		"_v1",
+		strings.Repeat("v", 128),
 	}
 	for _, tag := range ok {
 		if err := CheckImageTag(tag); err != nil {
@@ -1269,12 +1270,12 @@ func TestCheckImageTag(t *testing.T) {
 	}
 	bad := []string{
 		"",
-		"-v0.1.0",               // must begin with an alphanumeric
-		"v0.1.0-",               // and end with one
-		"my/team:v1",            // a registry path is not a tag
-		"v0.1.0 ",               // trailing space
-		"héllo",                 // not ASCII alphanumeric
-		strings.Repeat("v", 64), // one over the label limit
+		"-v0.1.0",                // cannot begin with '-'
+		".v1",                    // or '.'
+		"my/team:v1",             // a registry path is not a tag
+		"v0.1.0 ",                // trailing space
+		"héllo",                  // not ASCII alphanumeric
+		strings.Repeat("v", 129), // one over the tag limit
 	}
 	for _, tag := range bad {
 		if err := CheckImageTag(tag); err == nil {

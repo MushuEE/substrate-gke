@@ -170,8 +170,8 @@ func (s *imagesScreen) submitRelease() tea.Cmd {
 		s.errText = "The commit the images were built from is required."
 		return s.setFocus(2)
 	}
-	// The registry and the tag's existence are ate-setup's to report, but the
-	// tag doubles as the Substrate version, and that has to be a label value.
+	// The registry and the tag's existence are ate-setup's to report; the
+	// tag's form is checked here, before anything runs.
 	if err := snapshot.CheckImageTag(tag); err != nil {
 		s.errText = err.Error()
 		return s.setFocus(1)

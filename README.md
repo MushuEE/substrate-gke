@@ -273,7 +273,7 @@ For source builds using the default registry, the installer creates `ate-images`
 <summary><strong>Other details worth knowing</strong> (click to expand)</summary>
 
 - `ate-setup` pins every image to the digest its tag resolves to — nothing is built or pushed for a pre-built install.
-- The tag doubles as the Substrate version (it names the atelet DaemonSet and sets the `ate.dev/substrate-version` node label), so it must be a valid Kubernetes label value. The wizard validates this at the prompt. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
+- The tag doubles as the Substrate version that ate-setup records. The wizard checks at the prompt that it is a valid image tag. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
 - For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained).
 - Whatever you name is resolved to an exact commit *before* the install starts, and checked against the remote via a filtered shallow fetch — so a naming mismatch is caught at the prompt, not ten minutes into an install.
 
