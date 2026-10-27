@@ -129,13 +129,26 @@ upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0,
 `<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
 points at them.
 
-Actor templates must then name it explicitly:
+A WorkerPool then names it in `spec.sandboxClasses`:
 
 ```yaml
-sandboxConfig:
-  sandboxClass: SANDBOX_CLASS_MICROVM
-  configName: microvm
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: my-microvm-pool
+  labels:
+    workload: my-microvm-pool
+spec:
+  sandboxClasses:
+  - name: microvm
+    configRef:
+      name: microvm
+  workerImage: <ateworker-microvm image>
 ```
+
+An actor template runs on that pool by matching its labels in `workerSelector`, as
+upstream's `demos/counter/counter-microvm.yaml.tmpl` and
+`counter-microvm-template.yaml.tmpl` show.
 
 > [!WARNING]
 > **The installer does not yet provision KVM-capable node pools.** A micro-VM worker
@@ -222,10 +235,11 @@ The installer sets the allowlist when it turns Substrate on (step 6):
 
 To add a client after the install, redeploy the router with the full list. Each deploy
 replaces the list rather than adding to it. From the substrate checkout, with the
-cluster's environment set (the installer's upgrade hand-over prints it):
+cluster's ate-setup record as its configuration (see
+[Upgrading an installed cluster](#upgrading-an-installed-cluster) for where it is):
 
 ```bash
-go run ./cmd/ate-setup deploy atenet \
+go run ./cmd/ate-setup deploy atenet --config <record> \
   --credential-provider='{"name":"k8s.io"}' \
   --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-demo-counter/sa/default,spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default,spiffe://cluster.local/ns/shop/sa/frontend
 ```
@@ -272,7 +286,7 @@ For source builds using the default registry, the installer creates `ate-images`
 <summary><strong>Other details worth knowing</strong> (click to expand)</summary>
 
 - `ate-setup` pins every image to the digest its tag resolves to — nothing is built or pushed for a pre-built install.
-- The tag doubles as the Substrate version (it names the atelet DaemonSet and sets the `ate.dev/substrate-version` node label), so it must be a valid Kubernetes label value. The wizard validates this at the prompt. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
+- The tag doubles as the Substrate version that ate-setup records. The wizard checks at the prompt that it is a valid image tag. A tag carrying its digest (`v0.1.0-gke.1@sha256:…`) is fine — the version is the tag alone.
 - For build-from-source, a checkout of your own (fork included) is installed with `--substrate-root` instead — see [How Substrate itself is obtained](#how-substrate-itself-is-obtained).
 - Whatever you name is resolved to an exact commit *before* the install starts, and checked against the remote via a filtered shallow fetch — so a naming mismatch is caught at the prompt, not ten minutes into an install.
 
@@ -319,11 +333,13 @@ Every command's full output is written to a timestamped log under `<user cache d
 > [!CAUTION]
 > Do not re-run the install track against a cluster that already runs Substrate (the wizard blocks it). Run the installer and choose **Upgrade an installed cluster** instead.
 
-That flow names the cluster, reads what it currently runs, takes the new version from the images step, fetches both the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`, and prints the hand-over in runbook order for upstream's [rolling upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md): the runbook itself, the variables its commands use, which tree to check out, the environment for `ate-setup`, and what a rollback changes. **Nothing on the cluster changes until you follow the runbook.**
+From 1.0, upstream's [upgrade runbook](https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md) moves a cluster to a later patch release or to the next minor release.
 
-When a source upgrade needs the default Artifact Registry repository, the hand-over includes its setup commands.
+The upgrade flow prepares the runbook and changes nothing on the cluster. It names the cluster, reads the version and commit its API server reports (`ateapi --version` prints both), takes the new version from the images step, and fetches the installed and new source trees into `<user cache dir>/substrate-gke/upgrades/`. Press enter and it does the runbook's "Before you start" for you: it links the two trees into `~/ate-upgrade`, copies the cluster's ate-setup record there as `old.yaml` and `new.yaml`, installs the installed release's `kubectl ate`, and creates the snapshot transfer service account new releases use. It refuses to replace an `~/ate-upgrade` left from an earlier upgrade. Then run the one line it prints, which moves your shell to the new tree and sets `NEW_RELEASE` (or `VERSION` for a build from source), and follow the runbook from step 1. **Nothing on the cluster changes until you do.**
 
-The installed tree is fetched at the commit the running API server reports it was built from (Go stamps every binary; `ateapi --version` prints it). If the cluster can't be read, or the binary carries no commit, you'll be prompted to enter the commit, version, and image registry. For source builds, enter the registry the images were pushed to.
+ate-setup writes that record on every deploy, under `ATE_RECORD_DIR` or by default at `<user cache dir>/ate-setup/installs/gke_<project>_<location>_<cluster>.yaml`. On a machine without it, write one from the settings the cluster was installed with ([operator-install.md](https://github.com/agent-substrate/substrate/blob/main/docs/operator-install.md) lists them).
+
+The flow refuses an upgrade the runbook does not support, including a move between pre-built images and a build from source. If the API server doesn't report its build, you'll be prompted for the installed commit and version.
 
 ## Tearing down
 

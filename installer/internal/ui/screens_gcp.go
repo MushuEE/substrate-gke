@@ -998,11 +998,11 @@ type clusterScreen struct {
 	// Substrate), "partial" (ate-system namespace without atelet),
 	// "teardown-confirm"/"teardown" (deleting the control plane so the
 	// install can continue here), "confirm" (incompatible cluster chosen).
-	mode              string
-	nameInput         textinput.Model
-	comp              *execComp
-	parsed            bool
-	installedVersions []string
+	mode             string
+	nameInput        textinput.Model
+	comp             *execComp
+	parsed           bool
+	installedVersion string
 	// probed caches results per cluster, so browsing back and forth does not
 	// pay the multi-second gcloud+kubectl round trip again. [r] re-probes.
 	probed map[string]snapshot.InstalledProbe
@@ -1154,7 +1154,7 @@ func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.C
 		s.mode = "partial"
 		return nil
 	case res.Installed:
-		s.mode, s.installedVersions = "installed", res.Versions
+		s.mode, s.installedVersion = "installed", res.Version
 		return nil
 	case !c.SubstrateReady():
 		s.mode = "confirm"
@@ -1628,16 +1628,15 @@ func (s *clusterScreen) View(w int) string {
 	case "installed":
 		sel := s.clusters[s.cursor]
 		var verStr string
-		if len(s.installedVersions) > 0 {
-			verStr = fmt.Sprintf(" (version: %s)", strings.Join(s.installedVersions, ", "))
+		if s.installedVersion != "" {
+			verStr = fmt.Sprintf(" (version: %s)", s.installedVersion)
 		}
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
 			theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))+"\n\n"+
 				"Re-running the install track against an installed cluster is unsupported\n"+
-				"and produces a broken, mixed-version cluster:\n"+
-				"  • Control plane deployments roll to the new commit immediately.\n"+
-				"  • atelet and worker pools remain pinned to the older version,\n"+
-				"    causing router contract mismatches (e.g. 421 Misdirected Request).\n\n"+
+				"and leaves a mixed-version cluster, out of the upgrade order:\n"+
+				"  • The control plane and atelet roll to the new commit at once.\n"+
+				"  • Worker pools stay on the older worker image.\n\n"+
 				theme.Title.Render("Supported paths forward:")+"\n"+
 				"  1. Upgrade this cluster: exit or restart the installer and choose\n"+
 				"     \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.\n\n"+

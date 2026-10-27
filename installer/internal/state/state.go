@@ -70,10 +70,11 @@ var Order = []Step{
 }
 
 // UpgradeOrder is the flow for upgrading a cluster this installer set up. It
-// touches nothing in GCP: it reads the cluster's install record, asks where
-// the new version comes from with the same images step an install uses,
-// fetches the two source trees upstream's runbook runs from, and records the
-// new version. The upgrade itself is upstream's docs/upgrade.md.
+// changes nothing on the cluster: it reads the installed version off the
+// cluster, asks where the new version comes from with the same images step an
+// install uses, fetches the two source trees upstream's runbook runs from, and
+// sets up ~/ate-upgrade the way the runbook does. The upgrade itself is
+// upstream's docs/upgrade.md.
 var UpgradeOrder = []Step{
 	Welcome, CheckSetup, UpgradeSource, Images, UpgradePlan, Complete,
 }
@@ -229,17 +230,11 @@ type Setup struct {
 	// Upgrade selects the upgrade track: the cluster is already installed,
 	// and the run prepares upstream's rolling upgrade instead of installing.
 	Upgrade bool
-	// InstalledRepo, InstalledCommit and InstalledVersion describe the
-	// Substrate a cluster runs today, read off the cluster itself; an
-	// upgrade fetches that tree for rollback.
-	InstalledRepo    string
+	// InstalledCommit and InstalledVersion describe the Substrate a cluster
+	// runs today, as its API server reports them; an upgrade fetches that
+	// tree for rollback.
 	InstalledCommit  string
 	InstalledVersion string
-	// InstalledImageRepo and InstalledImageTag are set when the installed
-	// version runs published images; a build from source leaves them empty
-	// and its registry in KoDockerRepo.
-	InstalledImageRepo string
-	InstalledImageTag  string
 
 	// ImageRepo and ImageTag name an already-published set of Substrate
 	// images for ate-setup to install. When ImageRepo is empty the images are

@@ -1250,9 +1250,8 @@ func TestDeployAteSystemCredentialProvider(t *testing.T) {
 	}
 }
 
-// The tag becomes the node label and the atelet DaemonSet suffix, so ate-setup
-// refuses one that is not a valid label value. Catching it at the prompt beats
-// finding out once the cluster is half installed.
+// A registry refuses a tag outside the image tag grammar. Catching it at the
+// prompt beats finding out once the cluster is half installed.
 func TestCheckImageTag(t *testing.T) {
 	ok := []string{
 		testImageTag,
@@ -1260,7 +1259,9 @@ func TestCheckImageTag(t *testing.T) {
 		"40ca1ce6",
 		"1",
 		"release_2026.09.02-rc1",
-		strings.Repeat("v", 63),
+		"v0.1.0-",
+		"_v1",
+		strings.Repeat("v", 128),
 	}
 	for _, tag := range ok {
 		if err := CheckImageTag(tag); err != nil {
@@ -1269,12 +1270,12 @@ func TestCheckImageTag(t *testing.T) {
 	}
 	bad := []string{
 		"",
-		"-v0.1.0",               // must begin with an alphanumeric
-		"v0.1.0-",               // and end with one
-		"my/team:v1",            // a registry path is not a tag
-		"v0.1.0 ",               // trailing space
-		"héllo",                 // not ASCII alphanumeric
-		strings.Repeat("v", 64), // one over the label limit
+		"-v0.1.0",                // cannot begin with '-'
+		".v1",                    // or '.'
+		"my/team:v1",             // a registry path is not a tag
+		"v0.1.0 ",                // trailing space
+		"héllo",                  // not ASCII alphanumeric
+		strings.Repeat("v", 129), // one over the tag limit
 	}
 	for _, tag := range bad {
 		if err := CheckImageTag(tag); err == nil {
@@ -1428,8 +1429,7 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "cache", "substrate-x"), true)
 	b.UseSource(Revision{Repo: origin, Commit: newSHA})
 	st := testSetup(t)
-	st.KoDockerRepo = "registry.example.com/installed-images"
-	st.InstalledRepo, st.InstalledCommit, st.InstalledVersion = origin, oldSHA, "substrate-"+shorten(oldSHA)
+	st.InstalledCommit, st.InstalledVersion = oldSHA, "substrate-"+shorten(oldSHA)
 
 	// A path with a space and a $ in it: the script must quote it
 	// everywhere, messages included, or set -u aborts on the expansion.
@@ -1495,52 +1495,207 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if _, err := os.Stat(missingDir); err == nil {
 		t.Errorf("a failed fetch should leave no tree at %s", missingDir)
 	}
-	summary := b.UpgradeSummary(st, installedDir, nextDir)
-	for _, want := range []string{RunbookURL, "cd " + ShellQuote(installedDir), "cd " + ShellQuote(nextDir),
-		"export CLUSTER=" + ShellQuote(st.ClusterName), "export ZONE=" + ShellQuote(st.Zone),
-		"export OLD_VERSION=" + ShellQuote(st.InstalledVersion), "export NEW_VERSION=" + ShellQuote(b.SubstrateVersion(st)),
-		"export VERSION=" + ShellQuote(b.SubstrateVersion(st)), "export VERSION=" + ShellQuote(st.InstalledVersion),
-		"export KO_DOCKER_REPO=" + ShellQuote(st.BuildRepository()), "export CLUSTER_NAME=" + ShellQuote(st.ClusterName),
-		"export SNAPSHOT_TRANSFER_GSA_NAME=" + ShellQuote(TransferGSAName), "run . create iam --project-id " + ShellQuote(st.ProjectID)} {
-		if !strings.Contains(summary, want) {
-			t.Errorf("UpgradeSummary is missing %q:\n%s", want, summary)
-		}
+	// Setting up ~/ate-upgrade lays it out the way the runbook's own block
+	// does, from the trees just fetched and the cluster's record.
+	home, records := t.TempDir(), t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
+	record, err := RecordPath(st)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(summary, "NO_DEV_ENV") || strings.Count(summary, "export PROJECT_ID=") != 1 {
-		t.Errorf("the rollback block should carry only what changes:\n%s", summary)
+	if want := filepath.Join(records, "installs", "gke_acme_"+st.Zone+"_"+st.ClusterName+".yaml"); record != want {
+		t.Fatalf("RecordPath = %q, want %q", record, want)
 	}
-	// Every indented line is meant to be pasted into a shell, the cd lines
-	// into the trees just fetched. go and gcloud are stubbed: the lines that
-	// call them act on a GCP project.
-	script := []string{"go() { :; }", "gcloud() { :; }"}
-	for _, line := range strings.Split(summary, "\n") {
-		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
-			script = append(script, strings.TrimSpace(line))
-		}
+	prepare := b.PrepareUpgrade(st, installedDir, nextDir)
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "no ate-setup record") || !strings.Contains(out, record) {
+		t.Errorf("a missing record should stop the set-up (%v):\n%s", err, out)
 	}
-	script = append(script, `printf '%s|%s|%s' "$NEW_VERSION" "$VERSION" "$PWD"`)
-	out, err := exec.Command("bash", "-euo", "pipefail", "-c", strings.Join(script, "\n")).Output()
-	if err != nil || string(out) != b.SubstrateVersion(st)+"|"+st.InstalledVersion+"|"+installedDir {
-		t.Errorf("pasting the hand-over gave %q, %v", out, err)
+	if _, err := os.Lstat(filepath.Join(home, "ate-upgrade")); err == nil {
+		t.Errorf("a set-up without a record should leave no ~/ate-upgrade")
+	}
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A record that names no bucket cannot grant the transfer account on one.
+	if err := os.WriteFile(record, []byte("cluster:\n  substrateVersion: "+st.InstalledVersion+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "names no snapshot bucket") {
+		t.Errorf("a record without a bucket should stop the set-up (%v):\n%s", err, out)
+	}
+	if err := os.WriteFile(record, []byte("cluster:\n  substrateVersion: "+st.InstalledVersion+"\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// It creates the service account for the bucket the record names, which
+	// the upgrade track never asks for, and installs the installed release's
+	// kubectl-ate.
+	if out, err := runPrepare(t, prepare, home); err != nil {
+		t.Fatalf("set-up: %v\n%s", err, out)
+	}
+	if got, _ := os.Readlink(filepath.Join(home, "ate-upgrade", "old")); got != installedDir {
+		t.Errorf("~/ate-upgrade/old links to %q, want %q", got, installedDir)
+	}
+	if got, _ := os.Readlink(filepath.Join(home, "ate-upgrade", "new")); got != nextDir {
+		t.Errorf("~/ate-upgrade/new links to %q, want %q", got, nextDir)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "bucketName: ate-snapshots-acme") {
+		t.Errorf("old.yaml is not the record:\n%s", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "go-args")); !strings.Contains(string(got), "-C\n"+installedDir+"\ninstall\n./cmd/kubectl-ate") || !strings.HasSuffix(string(got), "--bucket\nate-snapshots-acme\n") {
+		t.Errorf("go ran with:\n%s", got)
+	}
+	// A second set-up must not replace the first: it may hold what that
+	// upgrade's rollback needs.
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "left from an earlier upgrade") {
+		t.Errorf("a second set-up should refuse (%v):\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(home, "ate-upgrade", "old.yaml")); err != nil {
+		t.Errorf("the refused set-up touched the first one: %v", err)
+	}
+	// The hand-over line moves a shell to the new tree with the version a
+	// build from source needs.
+	line := b.UpgradeShellLine(st)
+	out, err := exec.Command("bash", "-c", "export HOME="+ShellQuote(home)+"\n"+line+"\nprintf '%s|%s' \"$PWD\" \"$VERSION\"").Output()
+	if want := filepath.Join(home, "ate-upgrade", "new") + "|" + b.SubstrateVersion(st); err != nil || string(out) != want {
+		t.Errorf("the hand-over line gave %q, %v; want %q", out, err, want)
+	}
+	if notes := strings.Join(b.UpgradeNotes(st), "\n"); !strings.Contains(notes, "export VERSION="+st.InstalledVersion+" there") {
+		t.Errorf("a build from source needs the rollback version:\n%s", notes)
+	}
+	if summary := b.UpgradeSummary(st); !strings.Contains(summary, RunbookURL) || !strings.Contains(summary, line) {
+		t.Errorf("UpgradeSummary lacks the runbook or the line:\n%s", summary)
 	}
 }
 
-// A cluster that ran pre-built images and moves to a build from source: the
-// installed side exports the images it ran, the new side a registry for the
-// build to push to, which nothing in the upgrade flow asked for.
-func TestUpgradeExportsForAPrebuiltClusterMovingToSource(t *testing.T) {
+// runPrepare runs PrepareUpgrade's script with home as HOME, and with gcloud
+// and go stubbed: go records its arguments in ~/go-args.
+func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
+	t.Helper()
+	bin := t.TempDir()
+	for name, body := range map[string]string{
+		"gcloud": "#!/bin/sh\n",
+		"go":     "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$HOME/go-args\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// Pre-built images take their version from the tag in the record, so the
+// set-up moves new.yaml to the new registry and tag, and the hand-over sets
+// the release the runbook builds worker images from and clears any VERSION
+// that would override the tag; a rollback needs nothing from the shell.
+func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
+	records, home := t.TempDir(), t.TempDir()
+	t.Setenv("ATE_RECORD_DIR", records)
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	st := testSetup(t)
-	st.KoDockerRepo = ""
-	st.InstalledVersion, st.InstalledImageRepo, st.InstalledImageTag = "v0.1.0", testImageRepo, "v0.1.0"
-
-	installed := InstalledExports(st)
-	if !strings.Contains(installed, "export ATE_IMAGE_TAG='v0.1.0'") || strings.Contains(installed, "export KO_DOCKER_REPO") {
-		t.Errorf("installed exports:\n%s", installed)
+	st.ImageRepo, st.ImageTag = testImageRepo, "v0.6.1@sha256:5249637d3f23159045f6143efd01829d059a9f34a171c15b2464db213e501a42"
+	st.InstalledVersion = "v0.6.0"
+	record, err := RecordPath(st)
+	if err != nil {
+		t.Fatal(err)
 	}
-	next := b.NewExports(st)
-	if !strings.Contains(next, "export KO_DOCKER_REPO='us-west1-docker.pkg.dev/acme/ate-images'") || strings.Contains(next, "export ATE_IMAGE_TAG") {
-		t.Errorf("new exports:\n%s", next)
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("images:\n  repo: registry.example.com/old\n  tag: v0.6.0\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPrepare(t, b.PrepareUpgrade(st, "/trees/old", "/trees/new"), home); err != nil {
+		t.Fatalf("set-up: %v\n%s", err, out)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "  repo: "+testImageRepo+"\n  tag: v0.6.1\n") {
+		t.Errorf("new.yaml should name the new registry and tag:\n%s", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "  repo: registry.example.com/old\n  tag: v0.6.0\n") {
+		t.Errorf("old.yaml should stay the record:\n%s", got)
+	}
+	if line := b.UpgradeShellLine(st); line != "cd ~/ate-upgrade/new && export NEW_RELEASE=v0.6.1 && unset VERSION" {
+		t.Errorf("pre-built hand-over line: %s", line)
+	}
+	if summary := b.UpgradeSummary(st); strings.Contains(summary, "export VERSION") {
+		t.Errorf("a pre-built hand-over should not export a version:\n%s", summary)
+	}
+}
+
+// The runbook copies the record and changes only its tag, so the new
+// version has to come from the kind of images the record installs.
+func TestCheckImageSourceReadsTheRecord(t *testing.T) {
+	t.Setenv("ATE_RECORD_DIR", t.TempDir())
+	st := testSetup(t)
+	if err := CheckImageSource(st); err != nil {
+		t.Errorf("without a record there is nothing to check, got %v", err)
+	}
+	record, err := RecordPath(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(record, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const prebuilt = "cluster:\n  substrateVersion: v0.6.0\nimages:\n  repo: registry.example.com/substrate\n  tag: v0.6.0\nko:\n  defaultPlatforms: linux/amd64\n"
+	const source = "cluster:\n  substrateVersion: substrate-0123456789ab\nko:\n  dockerRepo: us-west1-docker.pkg.dev/acme/ate-images\n"
+	for _, tc := range []struct {
+		record       string
+		nextPrebuilt bool
+		ok           bool
+	}{
+		{prebuilt, true, true},
+		{prebuilt, false, false},
+		{source, false, true},
+		{source, true, false},
+	} {
+		write(tc.record)
+		st.ImageRepo, st.ImageTag = "", ""
+		if tc.nextPrebuilt {
+			st.ImageRepo, st.ImageTag = testImageRepo, "v0.6.1"
+		}
+		if err := CheckImageSource(st); (err == nil) != tc.ok {
+			t.Errorf("record %q, next pre-built=%v: %v, want ok=%v", tc.record, tc.nextPrebuilt, err, tc.ok)
+		}
+	}
+}
+
+// The runbook's table: patch releases of one minor, and from 1.0 the next
+// minor. Versions that are not releases are only compared for equality.
+func TestCheckUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		installed, next string
+		ok              bool
+	}{
+		{"v0.6.0", "v0.6.1", true},
+		{"v0.6.1", "v0.6.5", true},
+		{"v1.0.0-rc.1", "v1.0.0-rc.2", true},
+		{"v1.0.0-rc.2", "v1.0.0", true},
+		{"v1.0.0-rc.9", "v1.0.0-rc.10", true},
+		{"v1.0.3", "v1.1.0", true},
+		{"substrate-0123456789", "substrate-abcdef0123", true},
+		{"substrate-0123456789", "v0.6.1", true},
+		{"v0.6.0", "v0.6.0", false},
+		{"substrate-0123456789", "substrate-0123456789", false},
+		{"v0.5.2", "v0.6.0", false},
+		{"v1.0.0", "v1.2.0", false},
+		{"v1.4.0", "v2.0.0", false},
+		{"v0.6.1", "v0.6.0", false},
+		{"v1.1.0", "v1.0.5", false},
+		{"v1.2.3", "v1.2.3-rc.1", false},
+		{"v1.0.0-rc.10", "v1.0.0-rc.9", false},
+	} {
+		if err := CheckUpgrade(tc.installed, tc.next); (err == nil) != tc.ok {
+			t.Errorf("CheckUpgrade(%s, %s) = %v, want ok=%v", tc.installed, tc.next, err, tc.ok)
+		}
 	}
 }
 
@@ -1614,8 +1769,8 @@ func TestArtifactRegistryBootstrap(t *testing.T) {
 					t.Errorf("missing %q in %v", want, spec.Env)
 				}
 			}
-			if !tc.prebuilt && (!slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) || !strings.Contains(b.NewExports(st), "export KO_DOCKER_REPO="+ShellQuote(tc.registry))) {
-				t.Errorf("build and upgrade must use %q", tc.registry)
+			if !tc.prebuilt && !slices.Contains(spec.Env, "KO_DOCKER_REPO="+tc.registry) {
+				t.Errorf("build must use %q", tc.registry)
 			}
 			steps := 8
 			if tc.create {
@@ -1647,79 +1802,6 @@ func TestCleanupCommandRepositoryOptions(t *testing.T) {
 			want := CleanupCommand(st.ProjectID, st.ClusterName, st.Zone, st.BucketName) + tc.suffix
 			if got := b.CleanupCommand(st); got != want {
 				t.Errorf("cleanup = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-func TestUpgradePreparesDefaultArtifactRegistry(t *testing.T) {
-	t.Setenv("ATE_ATENET_DATAPLANE", "")
-	for _, tc := range []struct {
-		name, zone, repository, registry string
-		envoy, prebuilt                  bool
-	}{
-		{name: "zonal cluster", zone: "us-west1-c", envoy: true},
-		{name: "regional cluster with custom repository", zone: "europe-west4", repository: "build-images"},
-		{name: "explicit registry", zone: "us-west1-c", registry: "registry.example.com/shared", envoy: true},
-		{name: "prebuilt target", zone: "us-west1-c", envoy: true, prebuilt: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			st := testSetup(t)
-			st.Upgrade = true
-			st.InstalledCommit, st.InstalledVersion = Commit, testImageTag
-			st.InstalledImageRepo, st.InstalledImageTag = testImageRepo, testImageTag
-			st.Zone, st.ArtifactRegistryRepository, st.KoDockerRepo = tc.zone, tc.repository, tc.registry
-			if tc.prebuilt {
-				st.ImageRepo, st.ImageTag = testImageRepo, "v0.3.0"
-			}
-			b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-			b.UseSource(Revision{Repo: RepoURL, Commit: strings.Repeat("a", 40), EnvoyDataplane: tc.envoy})
-			b.SetupGCP = filepath.Join(t.TempDir(), "installer's tools/setup-gcp")
-			installed, next := t.TempDir(), filepath.Join(t.TempDir(), "new tree's checkout")
-			if err := os.Mkdir(next, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			var script []string
-			for _, line := range strings.Split(b.UpgradeSummary(st, installed, next), "\n") {
-				if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "  http") {
-					script = append(script, strings.TrimSpace(line))
-				}
-			}
-			bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
-			for _, name := range []string{"go", "gcloud"} {
-				if err := os.WriteFile(filepath.Join(bin, name), []byte(`#!/bin/sh
-printf '%s|%s|%s|%s\n' "${0##*/}" "$PWD" "$*" "${KO_DOCKER_REPO-}" >> "$UPGRADE_TEST_LOG"
-`), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-			cmd := exec.CommandContext(t.Context(), "bash", "-euo", "pipefail", "-c", strings.Join(script, "\n"))
-			cmd.Env = []string{"PATH=" + bin, "UPGRADE_TEST_LOG=" + log, "GCE_REGION=wrong-region", "ARTIFACT_REGISTRY_REPOSITORY=wrong-repository"}
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("upgrade instructions: %v\n%s", err, out)
-			}
-			data, err := os.ReadFile(log)
-			if err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
-			var want string
-			if !tc.prebuilt && tc.registry == "" {
-				registry := st.Region() + "-docker.pkg.dev/acme/" + st.RepositoryName()
-				want = "gcloud|" + next + "|services enable artifactregistry.googleapis.com --project acme|" + registry + "\n" +
-					"go|" + next + "|-C " + b.SetupGCP + " run . create repository --project-id acme --region " + st.Region() + " --name " + st.RepositoryName() + "|" + registry + "\n"
-				if tc.envoy {
-					want += "gcloud|" + next + "|auth configure-docker " + st.Region() + "-docker.pkg.dev|" + registry + "\n"
-				}
-			}
-			// Every upgrade creates the snapshot transfer service account,
-			// under the new release's exports.
-			koRepo := st.BuildRepository()
-			if tc.prebuilt {
-				koRepo = ""
-			}
-			want += "go|" + next + "|-C " + b.SetupGCP + " run . create iam --project-id acme --bucket " + st.BucketName + "|" + koRepo + "\n"
-			if string(data) != want {
-				t.Fatalf("preparation calls = %q, want %q", data, want)
 			}
 		})
 	}
@@ -1767,9 +1849,9 @@ func TestIngressAllowedSPIFFEIDsAppendsTheCallers(t *testing.T) {
 	}
 }
 
-// The control-plane deploy and the upgrade hand-over both carry the joined
-// list, replacing whatever the caller exported.
-func TestDeployAndUpgradeCarryTheIngressAllowlist(t *testing.T) {
+// The control-plane deploy carries the joined list, replacing whatever the
+// caller exported.
+func TestDeployCarriesTheIngressAllowlist(t *testing.T) {
 	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
 	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", frontend)
 	joined := strings.Join(append(slices.Clone(DemoClientSPIFFEIDs), frontend), ",")
@@ -1777,9 +1859,6 @@ func TestDeployAndUpgradeCarryTheIngressAllowlist(t *testing.T) {
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_INGRESS_ALLOWED_SPIFFE_IDS="+joined) {
 		t.Errorf("deploy env lacks the joined allowlist: %v", env)
-	}
-	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_INGRESS_ALLOWED_SPIFFE_IDS="+ShellQuote(joined)) {
-		t.Errorf("upgrade exports lack the joined allowlist:\n%s", exports)
 	}
 }
 
@@ -1813,30 +1892,24 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 }
 
 // From v0.6.0 ate-setup needs a cluster-wide snapshot location. The install's
-// own bucket is the one setup-gcp grants access to, so both the deploy and the
-// upgrade hand-over name its root.
-func TestDeployAndUpgradeCarryTheSnapshotLocation(t *testing.T) {
+// own bucket is the one setup-gcp grants access to, so the deploy names its
+// root.
+func TestDeployCarriesTheSnapshotLocation(t *testing.T) {
 	st := testSetup(t)
 	st.BucketName = "ate-snapshots-acme-c-z"
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "SNAPSHOT_LOCATION=gs://ate-snapshots-acme-c-z/") {
 		t.Errorf("deploy env lacks the snapshot location: %v", env)
 	}
-	if exports := b.NewExports(st); !strings.Contains(exports, "export SNAPSHOT_LOCATION='gs://ate-snapshots-acme-c-z/'") {
-		t.Errorf("upgrade exports lack the snapshot location:\n%s", exports)
-	}
 }
 
-// The control-plane deploy and the upgrade hand-over name the envoy dataplane,
-// whatever the caller exported.
-func TestDeployAndUpgradeNameTheEnvoyDataplane(t *testing.T) {
+// The control-plane deploy names the envoy dataplane, whatever the caller
+// exported.
+func TestDeployNamesTheEnvoyDataplane(t *testing.T) {
 	t.Setenv("ATE_ATENET_DATAPLANE", "agentgateway")
 	st := testSetup(t)
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
 	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_ATENET_DATAPLANE=envoy") {
 		t.Errorf("deploy env lacks ATE_ATENET_DATAPLANE=envoy: %v", env)
-	}
-	if exports := b.NewExports(st); !strings.Contains(exports, "export ATE_ATENET_DATAPLANE='envoy'") {
-		t.Errorf("upgrade exports lack the envoy dataplane:\n%s", exports)
 	}
 }

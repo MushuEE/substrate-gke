@@ -15,23 +15,27 @@
 package snapshot
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-on-gke/substrate-gke/installer/internal/execx"
 	"github.com/ai-on-gke/substrate-gke/installer/internal/state"
 )
 
-// RunbookURL is upstream's rolling upgrade runbook, which the upgrade track
-// prepares for and hands over to.
+// RunbookURL is upstream's upgrade runbook, which the upgrade track prepares
+// for and hands over to.
 const RunbookURL = "https://github.com/agent-substrate/substrate/blob/main/docs/upgrade.md"
 
 // DefaultUpgradeDir is where the upgrade track keeps the two source trees.
 // They live beside the install cache but outside the directories Cleanup
-// sweeps, because the runbook runs from them for as long as the upgrade
-// takes, rollback included.
+// sweeps, because the runbook runs from them, through the links the hand-over
+// makes, for as long as the upgrade takes, rollback included.
 func DefaultUpgradeDir() (string, error) {
 	dir, err := os.UserCacheDir()
 	if err != nil {
@@ -80,14 +84,14 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 		)
 	}
 	// The installed commit was read off the cluster, not resolved against
-	// upstream like the new one; a fork or a private hotfix fails here.
-	notUpstream := fmt.Sprintf("Commit %s is not in %s: the installed Substrate was built from a fork or a private hotfix. Follow the runbook from a checkout of your own instead.", st.InstalledCommit, st.InstalledRepo)
+	// the repository like the new one; a fork or a private hotfix fails here.
+	notUpstream := fmt.Sprintf("Commit %s is not in %s: the installed Substrate was built from a fork or a private hotfix. Follow the runbook from a checkout of your own instead.", st.InstalledCommit, b.repo)
 	lines := []string{
 		"set -euo pipefail",
 		`trap 'rm -rf "${stage_installed:-}" "${stage_next:-}"' EXIT`,
 		`trap 'exit 130' INT TERM`,
 	}
-	lines = append(lines, fetch("stage_installed", installedDir, st.InstalledRepo, st.InstalledCommit, notUpstream)...)
+	lines = append(lines, fetch("stage_installed", installedDir, b.repo, st.InstalledCommit, notUpstream)...)
 	lines = append(lines, fetch("stage_next", nextDir, b.repo, b.commit, "")...)
 	return execx.Spec{
 		Label:   "fetch the installed and the new Substrate trees",
@@ -100,53 +104,236 @@ func (b *Builder) FetchTrees(st *state.Setup, installedDir, nextDir string) exec
 	}
 }
 
-// NewExports is the environment for the runbook's ate-setup commands from
-// the new tree: the cluster, and the new version with where its images come
-// from.
-func (b *Builder) NewExports(st *state.Setup) string {
-	next := Probe{KoDockerRepo: st.BuildRepository()}
-	if st.Prebuilt() {
-		next = Probe{ImageRepo: st.ImageRepo, ImageTag: st.ImageTag}
+// RecordPath is the record ate-setup wrote of the cluster st names when it
+// deployed there: under ATE_RECORD_DIR, or by default the user cache
+// directory, one file per kube context. ate-setup fetched the credentials
+// itself, so the context is the one gcloud names.
+func RecordPath(st *state.Setup) (string, error) {
+	dir := os.Getenv("ATE_RECORD_DIR")
+	if dir == "" {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot locate the cache directory ate-setup records installs in: %w", err)
+		}
+		dir = filepath.Join(base, "ate-setup")
 	}
-	return next.Exports(st, b.SubstrateVersion(st))
+	context := "gke_" + st.ProjectID + "_" + st.Zone + "_" + st.ClusterName
+	return filepath.Join(dir, "installs", context+".yaml"), nil
 }
 
-// UpgradeSummary is the hand-over, in the order the runbook reads: the
-// runbook, the variables its own commands use, then for its "Checkout and
-// environment" section the new tree and the ate-setup environment, and for
-// a rollback what changes in them.
-func (b *Builder) UpgradeSummary(st *state.Setup, installedDir, nextDir string) string {
-	var sb strings.Builder
-	block := func(heading string, lines ...string) {
-		sb.WriteString(heading + "\n")
-		for _, line := range lines {
-			sb.WriteString("  " + line + "\n")
-		}
-		sb.WriteString("\n")
+var releaseVersion = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$`)
+
+// CheckUpgrade reports whether the runbook supports moving from installed to
+// next. Per its table, patch releases of one minor can, and from 1.0 so can
+// the next minor. A pre-release such as v1.0.0-rc.1 comes before its release.
+// A version that is not a release, such as a build from source, is only
+// checked for being a different one.
+func CheckUpgrade(installed, next string) error {
+	if installed == next {
+		return errors.New("the cluster already runs that version")
 	}
-	block("Run upstream's rolling upgrade runbook:", RunbookURL)
-	block("Variables the runbook uses. The rest of its Preflight table ($NODEPOOL, $NS,\n$OLD_WORKERPOOL, $NEW_WORKERPOOL, $NODE) is yours to fill in.",
-		"export CLUSTER="+ShellQuote(st.ClusterName),
-		"export ZONE="+ShellQuote(st.Zone),
-		"export OLD_VERSION="+ShellQuote(st.InstalledVersion),
-		"export NEW_VERSION="+ShellQuote(b.SubstrateVersion(st)))
-	block("When you reach its \"Checkout and environment\" section, check out the new release\nand set this for every ate-setup command of the upgrade:",
-		append([]string{"cd " + ShellQuote(nextDir)}, strings.Split(b.NewExports(st), "\n")...)...)
-	if st.CreatesArtifactRepository() {
-		commands := []string{
-			"gcloud services enable artifactregistry.googleapis.com --project " + ShellQuote(st.ProjectID),
-			fmt.Sprintf("go -C %s run . create repository --project-id %s --region %s --name %s",
-				ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.Region()), ShellQuote(st.RepositoryName())),
-		}
-		if b.BuildsWithDocker(st) {
-			commands = append(commands, "gcloud auth configure-docker "+ShellQuote(st.Region()+"-docker.pkg.dev"))
-		}
-		block("Before building images for this upgrade, prepare the default registry:", commands...)
+	from, to := releaseVersion.FindStringSubmatch(installed), releaseVersion.FindStringSubmatch(next)
+	if from == nil || to == nil {
+		return nil
 	}
-	block("Before deploying Substrate v0.6.0 or later, create the snapshot transfer service account\nits credential exchange impersonates, with its grants. It only adds bindings, so it is\nsafe to run for an older release:",
-		fmt.Sprintf("SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket %s",
-			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID), ShellQuote(st.BucketName)))
-	block("A rollback runs the same commands from the installed release, with its version:",
-		append([]string{"cd " + ShellQuote(installedDir)}, strings.Split(InstalledExports(st), "\n")...)...)
-	return strings.TrimRight(sb.String(), "\n")
+	n := func(m []string, i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	major, minor := n(from, 1), n(from, 2)
+	older := cmp.Or(cmp.Compare(n(to, 1), major), cmp.Compare(n(to, 2), minor), cmp.Compare(n(to, 3), n(from, 3)), comparePrerelease(to[4], from[4])) < 0
+	switch {
+	case older:
+		return fmt.Errorf("%s is older than the installed %s; the runbook's rollback covers going back", next, installed)
+	case n(to, 1) != major:
+		return errors.New("a new major release needs a reinstall")
+	case major == 0 && n(to, 2) != minor:
+		return errors.New("before 1.0, a new minor release needs a reinstall")
+	case n(to, 2) > minor+1:
+		return fmt.Errorf("minor releases cannot be skipped; upgrade to v%d.%d first", major, minor+1)
+	}
+	return nil
+}
+
+// comparePrerelease orders two pre-release suffixes the way semver does: a
+// release ("") after any pre-release of it, then identifier by identifier,
+// numbers numerically and before words.
+func comparePrerelease(a, b string) int {
+	switch {
+	case a == b:
+		return 0
+	case a == "":
+		return 1
+	case b == "":
+		return -1
+	}
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		an, aErr := strconv.Atoi(as[i])
+		bn, bErr := strconv.Atoi(bs[i])
+		var c int
+		switch {
+		case aErr == nil && bErr == nil:
+			c = cmp.Compare(an, bn)
+		case aErr == nil:
+			c = -1
+		case bErr == nil:
+			c = 1
+		default:
+			c = strings.Compare(as[i], bs[i])
+		}
+		if c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(as), len(bs))
+}
+
+// RecordPrebuilt reports whether the record at path installs pre-built
+// images: whether it has a repo under images, read line by line the way the
+// runbook's own commands read the record. ok is false when there is no
+// record to read.
+func RecordPrebuilt(path string) (prebuilt, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	inImages := false
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case line == "images:":
+			inImages = true
+		case !strings.HasPrefix(line, " "):
+			inImages = false
+		case inImages && strings.HasPrefix(strings.TrimSpace(line), "repo:"):
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "repo:")) != "", true
+		}
+	}
+	return false, true
+}
+
+// CheckImageSource reports whether the new version comes from the kind of
+// images the cluster's record installs. The runbook copies the record into
+// new.yaml and changes only where its pre-built images come from, so it
+// cannot move a cluster between pre-built images and a build from source.
+// Without a record there is nothing to check yet.
+func CheckImageSource(st *state.Setup) error {
+	record, err := RecordPath(st)
+	if err != nil {
+		return nil
+	}
+	prebuilt, ok := RecordPrebuilt(record)
+	switch {
+	case !ok || prebuilt == st.Prebuilt():
+		return nil
+	case prebuilt:
+		return errors.New("its record installs pre-built images, and the runbook moves them only to other pre-built images")
+	default:
+		return errors.New("its record installs a build from source, and the runbook builds the new release the same way")
+	}
+}
+
+// UpgradeHome is the directory upstream's runbook works in.
+const UpgradeHome = "~/ate-upgrade"
+
+// PrepareUpgrade is the runbook's "Before you start" done for the cluster,
+// from the trees already fetched and ate-setup's record of the cluster, plus
+// the GKE preparation the runbook leaves out. It refuses to replace an
+// ~/ate-upgrade left from an earlier upgrade, which may still hold what that
+// upgrade's rollback needs, and lays the directory out last, whole, so a
+// failed run leaves nothing to delete before a retry.
+func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) execx.Spec {
+	record, err := RecordPath(st)
+	if err != nil {
+		record = ""
+	}
+	noRecord := fmt.Sprintf("This machine has no ate-setup record of %s at %s. Write one from the settings the cluster was installed with (upstream's docs/operator-install.md lists them), then retry.", st.ClusterName, record)
+	lines := []string{
+		"set -euo pipefail",
+		"record=" + ShellQuote(record),
+		`up="$HOME/ate-upgrade"`,
+		`[ -f "$record" ] || { echo ` + ShellQuote(noRecord) + ` >&2; exit 1; }`,
+		`if [ -e "$up" ] || [ -L "$up" ]; then echo "$up is left from an earlier upgrade. Delete it once that upgrade no longer needs it for a rollback, then retry." >&2; exit 1; fi`,
+		// The upgrade track never asks for the bucket; the record names it.
+		`bucket=$(sed -n 's/^  bucketName: //p' "$record")`,
+		`[ -n "$bucket" ] || { echo "$record names no snapshot bucket (storage.bucketName). Add the bucket the cluster was installed with, then retry." >&2; exit 1; }`,
+		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s",
+			ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID)),
+		fmt.Sprintf(`echo "Installing kubectl-ate from substrate@%s"`, shorten(st.InstalledCommit)),
+		"go -C " + ShellQuote(installedDir) + " install ./cmd/kubectl-ate",
+		// Substrate v0.6.0 and later impersonate the snapshot transfer
+		// service account; creating it only adds bindings, so it is safe
+		// for an older release too.
+		fmt.Sprintf(`SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket "$bucket"`,
+			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID)),
+		`stage=$(mktemp -d "$up.XXXXXX")`,
+		`trap 'rm -rf "$stage"' EXIT`,
+		`cp "$record" "$stage/old.yaml"`,
+		`cp "$record" "$stage/new.yaml"`,
+	}
+	if st.Prebuilt() {
+		// The images step may name another registry, such as a mirror.
+		lines = append(lines, fmt.Sprintf(`sed -i.bak -e %s -e %s "$stage/new.yaml"`,
+			ShellQuote("s|^  repo: .*|  repo: "+st.ImageRepo+"|"), ShellQuote("s|^  tag: .*|  tag: "+b.SubstrateVersion(st)+"|")))
+	}
+	lines = append(lines,
+		`ln -s `+ShellQuote(installedDir)+` "$stage/old"`,
+		`ln -s `+ShellQuote(nextDir)+` "$stage/new"`,
+		`mv "$stage" "$up"`,
+		`echo "Set up $up: old.yaml and new.yaml from $record, old and new linked to the two trees"`,
+	)
+	return execx.Spec{
+		Label:            "prepare ~/ate-upgrade",
+		Display:          fmt.Sprintf("Set up %s for %s", UpgradeHome, st.ClusterName),
+		DisplayIsSummary: true,
+		Argv:             []string{"bash", "-c", strings.Join(lines, "\n")},
+		SimLines: []string{
+			"Fetching cluster endpoint and auth data.",
+			fmt.Sprintf("kubeconfig entry generated for %s.", st.ClusterName),
+			fmt.Sprintf("Installing kubectl-ate from substrate@%s", shorten(st.InstalledCommit)),
+			"Creating the snapshot transfer service account",
+			fmt.Sprintf("Set up %s: old.yaml and new.yaml from %s, old and new linked to the two trees", UpgradeHome, record),
+		},
+	}
+}
+
+// UpgradeShellLine is what PrepareUpgrade cannot do for the shell the runbook
+// runs from: move it to the new tree and set the variables the runbook reads.
+// The runbook's step 3 builds a pre-built worker image from NEW_RELEASE. A
+// build from source takes its version from VERSION, which the record does not
+// keep; pre-built images take it from the tag in new.yaml, unless a VERSION
+// left in the shell overrides it.
+func (b *Builder) UpgradeShellLine(st *state.Setup) string {
+	next := versionWord(b.SubstrateVersion(st))
+	if st.Prebuilt() {
+		return fmt.Sprintf("cd %s/new && export NEW_RELEASE=%s && unset VERSION", UpgradeHome, next)
+	}
+	return fmt.Sprintf("cd %s/new && export VERSION=%s", UpgradeHome, next)
+}
+
+// versionWord renders a version as a shell word for a line the user pastes.
+// A version is an image tag, which needs no quoting; anything else is quoted
+// rather than trusted.
+func versionWord(v string) string {
+	if imageTag.MatchString(v) {
+		return v
+	}
+	return ShellQuote(v)
+}
+
+// UpgradeNotes are what the hand-over line does not cover: a new shell, and
+// the version a rollback from source runs as.
+func (b *Builder) UpgradeNotes(st *state.Setup) []string {
+	notes := []string{"Run it again in any new shell before going on."}
+	if !st.Prebuilt() {
+		notes = append(notes, fmt.Sprintf("A rollback runs from %s/old: export VERSION=%s there first.", UpgradeHome, versionWord(st.InstalledVersion)))
+	}
+	return notes
+}
+
+// UpgradeSummary is the hand-over printed when the installer exits: the
+// runbook, the line to run, then the notes.
+func (b *Builder) UpgradeSummary(st *state.Setup) string {
+	lines := []string{"Run this in the shell you upgrade from, then follow upstream's upgrade runbook from step 1:", "  " + RunbookURL, "", "  " + b.UpgradeShellLine(st)}
+	for _, note := range b.UpgradeNotes(st) {
+		lines = append(lines, "", note)
+	}
+	return strings.Join(lines, "\n")
 }
