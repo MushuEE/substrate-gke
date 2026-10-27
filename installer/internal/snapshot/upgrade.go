@@ -15,6 +15,7 @@
 package snapshot
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -120,15 +121,16 @@ func RecordPath(st *state.Setup) (string, error) {
 	return filepath.Join(dir, "installs", context+".yaml"), nil
 }
 
-var releaseVersion = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$`)
+var releaseVersion = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$`)
 
 // CheckUpgrade reports whether the runbook supports moving from installed to
 // next. Per its table, patch releases of one minor can, and from 1.0 so can
-// the next minor. A version that is not a release, such as a build from
-// source, is only checked for being a different one.
+// the next minor. A pre-release such as v1.0.0-rc.1 comes before its release.
+// A version that is not a release, such as a build from source, is only
+// checked for being a different one.
 func CheckUpgrade(installed, next string) error {
 	if installed == next {
-		return errors.New("that is the version it runs")
+		return errors.New("the cluster already runs that version")
 	}
 	from, to := releaseVersion.FindStringSubmatch(installed), releaseVersion.FindStringSubmatch(next)
 	if from == nil || to == nil {
@@ -136,8 +138,9 @@ func CheckUpgrade(installed, next string) error {
 	}
 	n := func(m []string, i int) int { v, _ := strconv.Atoi(m[i]); return v }
 	major, minor := n(from, 1), n(from, 2)
+	older := cmp.Or(cmp.Compare(n(to, 1), major), cmp.Compare(n(to, 2), minor), cmp.Compare(n(to, 3), n(from, 3)), comparePrerelease(to[4], from[4])) < 0
 	switch {
-	case n(to, 1) < major || n(to, 1) == major && (n(to, 2) < minor || n(to, 2) == minor && n(to, 3) < n(from, 3)):
+	case older:
 		return fmt.Errorf("%s is older than the installed %s; the runbook's rollback covers going back", next, installed)
 	case n(to, 1) != major:
 		return errors.New("a new major release needs a reinstall")
@@ -147,6 +150,40 @@ func CheckUpgrade(installed, next string) error {
 		return fmt.Errorf("minor releases cannot be skipped; upgrade to v%d.%d first", major, minor+1)
 	}
 	return nil
+}
+
+// comparePrerelease orders two pre-release suffixes the way semver does: a
+// release ("") after any pre-release of it, then identifier by identifier,
+// numbers numerically and before words.
+func comparePrerelease(a, b string) int {
+	switch {
+	case a == b:
+		return 0
+	case a == "":
+		return 1
+	case b == "":
+		return -1
+	}
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		an, aErr := strconv.Atoi(as[i])
+		bn, bErr := strconv.Atoi(bs[i])
+		var c int
+		switch {
+		case aErr == nil && bErr == nil:
+			c = cmp.Compare(an, bn)
+		case aErr == nil:
+			c = -1
+		case bErr == nil:
+			c = 1
+		default:
+			c = strings.Compare(as[i], bs[i])
+		}
+		if c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(as), len(bs))
 }
 
 // RecordPrebuilt reports whether the record at path installs pre-built
@@ -174,9 +211,9 @@ func RecordPrebuilt(path string) (prebuilt, ok bool) {
 
 // CheckImageSource reports whether the new version comes from the kind of
 // images the cluster's record installs. The runbook copies the record into
-// new.yaml and changes only its image tag, so it cannot move a cluster
-// between pre-built images and a build from source. Without a record there
-// is nothing to check yet.
+// new.yaml and changes only where its pre-built images come from, so it
+// cannot move a cluster between pre-built images and a build from source.
+// Without a record there is nothing to check yet.
 func CheckImageSource(st *state.Setup) error {
 	record, err := RecordPath(st)
 	if err != nil {
@@ -187,7 +224,7 @@ func CheckImageSource(st *state.Setup) error {
 	case !ok || prebuilt == st.Prebuilt():
 		return nil
 	case prebuilt:
-		return errors.New("its record installs pre-built images, and the runbook only moves them to another tag")
+		return errors.New("its record installs pre-built images, and the runbook moves them only to other pre-built images")
 	default:
 		return errors.New("its record installs a build from source, and the runbook builds the new release the same way")
 	}
@@ -214,15 +251,17 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 		`up="$HOME/ate-upgrade"`,
 		`[ -f "$record" ] || { echo ` + ShellQuote(noRecord) + ` >&2; exit 1; }`,
 		`if [ -e "$up" ] || [ -L "$up" ]; then echo "$up is left from an earlier upgrade. Delete it once that upgrade no longer needs it for a rollback, then retry." >&2; exit 1; fi`,
+		// The upgrade track never asks for the bucket; the record names it.
+		`bucket=$(sed -n 's/^  bucketName: //p' "$record")`,
+		`[ -n "$bucket" ] || { echo "$record names no snapshot bucket (storage.bucketName). Add the bucket the cluster was installed with, then retry." >&2; exit 1; }`,
 		fmt.Sprintf("gcloud container clusters get-credentials %s --location %s --project %s",
 			ShellQuote(st.ClusterName), ShellQuote(st.Zone), ShellQuote(st.ProjectID)),
 		fmt.Sprintf(`echo "Installing kubectl-ate from substrate@%s"`, shorten(st.InstalledCommit)),
 		"go -C " + ShellQuote(installedDir) + " install ./cmd/kubectl-ate",
 		// Substrate v0.6.0 and later impersonate the snapshot transfer
 		// service account; creating it only adds bindings, so it is safe
-		// for an older release too. The upgrade track never asks for the
-		// bucket; the record names it.
-		fmt.Sprintf(`SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket "$(sed -n 's/^  bucketName: //p' "$record")"`,
+		// for an older release too.
+		fmt.Sprintf(`SNAPSHOT_TRANSFER_GSA_NAME=%s go -C %s run . create iam --project-id %s --bucket "$bucket"`,
 			ShellQuote(TransferGSAName), ShellQuote(b.SetupGCP), ShellQuote(st.ProjectID)),
 		`stage=$(mktemp -d "$up.XXXXXX")`,
 		`trap 'rm -rf "$stage"' EXIT`,
@@ -230,7 +269,9 @@ func (b *Builder) PrepareUpgrade(st *state.Setup, installedDir, nextDir string) 
 		`cp "$record" "$stage/new.yaml"`,
 	}
 	if st.Prebuilt() {
-		lines = append(lines, fmt.Sprintf(`sed -i.bak "s/^  tag: .*/  tag: %s/" "$stage/new.yaml"`, b.SubstrateVersion(st)))
+		// The images step may name another registry, such as a mirror.
+		lines = append(lines, fmt.Sprintf(`sed -i.bak -e %s -e %s "$stage/new.yaml"`,
+			ShellQuote("s|^  repo: .*|  repo: "+st.ImageRepo+"|"), ShellQuote("s|^  tag: .*|  tag: "+b.SubstrateVersion(st)+"|")))
 	}
 	lines = append(lines,
 		`ln -s `+ShellQuote(installedDir)+` "$stage/old"`,

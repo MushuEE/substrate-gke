@@ -1638,7 +1638,7 @@ func TestUpgradeTrackRefusesAnUnsupportedUpgrade(t *testing.T) {
 	if plan.blocked == "" || plan.fetch != nil {
 		t.Fatalf("upgrading %s onto itself should be refused, got blocked=%q", testImageTag, plan.blocked)
 	}
-	if view := app.View(); !strings.Contains(view, "the version it runs") {
+	if view := app.View(); !strings.Contains(view, "the cluster already runs that") {
 		t.Errorf("plan view should say why:\n%s", view)
 	}
 	pump(t, app, key("b"))

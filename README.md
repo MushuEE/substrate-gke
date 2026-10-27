@@ -129,13 +129,26 @@ upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0,
 `<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
 points at them.
 
-Actor templates must then name it explicitly:
+A WorkerPool then names it in `spec.sandboxClasses`:
 
 ```yaml
-sandboxConfig:
-  sandboxClass: SANDBOX_CLASS_MICROVM
-  configName: microvm
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: my-microvm-pool
+  labels:
+    workload: my-microvm-pool
+spec:
+  sandboxClasses:
+  - name: microvm
+    configRef:
+      name: microvm
+  workerImage: <ateworker-microvm image>
 ```
+
+An actor template runs on that pool by matching its labels in `workerSelector`, as
+upstream's `demos/counter/counter-microvm.yaml.tmpl` and
+`counter-microvm-template.yaml.tmpl` show.
 
 > [!WARNING]
 > **The installer does not yet provision KVM-capable node pools.** A micro-VM worker

@@ -1516,6 +1516,13 @@ func TestFetchTreesFetchesBothCommits(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A record that names no bucket cannot grant the transfer account on one.
+	if err := os.WriteFile(record, []byte("cluster:\n  substrateVersion: "+st.InstalledVersion+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPrepare(t, prepare, home); err == nil || !strings.Contains(out, "names no snapshot bucket") {
+		t.Errorf("a record without a bucket should stop the set-up (%v):\n%s", err, out)
+	}
 	if err := os.WriteFile(record, []byte("cluster:\n  substrateVersion: "+st.InstalledVersion+"\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1580,9 +1587,9 @@ func runPrepare(t *testing.T, spec execx.Spec, home string) (string, error) {
 }
 
 // Pre-built images take their version from the tag in the record, so the
-// set-up moves new.yaml to the new tag, and the hand-over sets the release the
-// runbook builds worker images from and clears any VERSION that would
-// override the tag; a rollback needs nothing from the shell.
+// set-up moves new.yaml to the new registry and tag, and the hand-over sets
+// the release the runbook builds worker images from and clears any VERSION
+// that would override the tag; a rollback needs nothing from the shell.
 func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	records, home := t.TempDir(), t.TempDir()
 	t.Setenv("ATE_RECORD_DIR", records)
@@ -1597,14 +1604,17 @@ func TestUpgradeSummaryForPrebuiltImages(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(record), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(record, []byte("images:\n  repo: "+testImageRepo+"\n  tag: v0.6.0\n"), 0o600); err != nil {
+	if err := os.WriteFile(record, []byte("images:\n  repo: registry.example.com/old\n  tag: v0.6.0\nstorage:\n  bucketName: ate-snapshots-acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := runPrepare(t, b.PrepareUpgrade(st, "/trees/old", "/trees/new"), home); err != nil {
 		t.Fatalf("set-up: %v\n%s", err, out)
 	}
-	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "\n  tag: v0.6.1\n") {
-		t.Errorf("new.yaml should name the new tag:\n%s", got)
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "new.yaml")); !strings.Contains(string(got), "  repo: "+testImageRepo+"\n  tag: v0.6.1\n") {
+		t.Errorf("new.yaml should name the new registry and tag:\n%s", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(home, "ate-upgrade", "old.yaml")); !strings.Contains(string(got), "  repo: registry.example.com/old\n  tag: v0.6.0\n") {
+		t.Errorf("old.yaml should stay the record:\n%s", got)
 	}
 	if line := b.UpgradeShellLine(st); line != "cd ~/ate-upgrade/new && export NEW_RELEASE=v0.6.1 && unset VERSION" {
 		t.Errorf("pre-built hand-over line: %s", line)
@@ -1669,6 +1679,7 @@ func TestCheckUpgrade(t *testing.T) {
 		{"v0.6.1", "v0.6.5", true},
 		{"v1.0.0-rc.1", "v1.0.0-rc.2", true},
 		{"v1.0.0-rc.2", "v1.0.0", true},
+		{"v1.0.0-rc.9", "v1.0.0-rc.10", true},
 		{"v1.0.3", "v1.1.0", true},
 		{"substrate-0123456789", "substrate-abcdef0123", true},
 		{"substrate-0123456789", "v0.6.1", true},
@@ -1679,6 +1690,8 @@ func TestCheckUpgrade(t *testing.T) {
 		{"v1.4.0", "v2.0.0", false},
 		{"v0.6.1", "v0.6.0", false},
 		{"v1.1.0", "v1.0.5", false},
+		{"v1.2.3", "v1.2.3-rc.1", false},
+		{"v1.0.0-rc.10", "v1.0.0-rc.9", false},
 	} {
 		if err := CheckUpgrade(tc.installed, tc.next); (err == nil) != tc.ok {
 			t.Errorf("CheckUpgrade(%s, %s) = %v, want ok=%v", tc.installed, tc.next, err, tc.ok)
