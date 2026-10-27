@@ -48,6 +48,7 @@ func main() {
 		gkeOverlay    = flag.String("gke-overlay", "", "path to this repository's deploy/gke (default: found above the working directory or the executable)")
 		addOverlay    = flag.String("add-gke-overlay", "", "add deploy/gke to the substrate tree in this directory if it lacks upstream's GKE manifests, and exit")
 		checkOverlay  = flag.String("check-gke-overlay", "", "report whether the substrate tree in this directory needs deploy/gke, without changing it, and exit")
+		demo          = flag.Bool("demo", false, "demo install: end with a counter demo, and allow its driver pods on the ingress router (make run-demo)")
 	)
 	flag.Parse()
 
@@ -175,6 +176,7 @@ func main() {
 	deps.Builder.SetupGCP = setupGCPDir
 	deps.Builder.GKEOverlay = overlayDir
 	deps.Builder.Self = exe
+	deps.Setup.DemoMode = *demo
 	if dir, err := snapshot.DefaultUpgradeDir(); err == nil {
 		deps.UpgradeDir = dir
 	} else {
@@ -311,7 +313,7 @@ func printSummary(app *ui.App, deps *ui.Deps, cleaned bool) {
 		for _, cmd := range demo {
 			command(cmd)
 		}
-		if routerNote := b.RouterNote(); routerNote != "" {
+		if routerNote := b.RouterNote(st); routerNote != "" {
 			note(routerNote)
 		}
 	}

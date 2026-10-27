@@ -127,6 +127,7 @@ func NewApp(deps *Deps) *App {
 	slash.Placeholder = "help · back · skip · exit"
 	slash.CharLimit = 32
 	a := &App{deps: deps, mach: state.NewMachine(), slash: slash}
+	a.mach.SetOrder(state.InstallOrder(deps.Setup.DemoMode))
 	a.cur = a.screenFor(a.mach.Current())
 	return a
 }
@@ -145,6 +146,8 @@ func (a *App) screenFor(s state.Step) Screen {
 		return newClusterScreen(a.deps)
 	case state.Provision:
 		return newProvisionScreen(a.deps)
+	case state.IngressClients:
+		return newIngressScreen(a.deps)
 	case state.ControlPlane:
 		return newControlPlaneScreen(a.deps)
 	case state.Sandbox:
@@ -189,7 +192,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.deps.Setup.Upgrade {
 					a.mach.SetOrder(state.UpgradeOrder)
 				} else {
-					a.mach.SetOrder(state.Order)
+					a.mach.SetOrder(state.InstallOrder(a.deps.Setup.DemoMode))
 				}
 			}
 			step := a.mach.Next()

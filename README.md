@@ -50,18 +50,20 @@ git clone https://github.com/ai-on-gke/substrate-gke.git
 cd substrate-gke
 gcloud auth application-default login
 make run          # launch the interactive installer
+make run-demo     # or: install and deploy the counter demo
 ```
 
 **Useful variants**
 
 | Command | What it does |
 |---|---|
+| `make run-demo` | Installs, then deploys the counter demo; the demo's driver pods are allowed on the ingress router on your behalf |
 | `make doctor` | Preflight checks only — no GCP calls |
 | `make dry-run` | Walks the full wizard without touching GCP |
 
 ## What the installer does
 
-A terminal wizard walks the ten steps below, running the real command it shows and streaming its output as it goes:
+A terminal wizard walks the steps below, running the real command it shows and streaming its output as it goes. `make run` walks steps 1–10; `make run-demo` adds step 11:
 
 | # | Step | What happens |
 |---|---|---|
@@ -70,11 +72,12 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 | 3 | 🏗️ Choose your GCP project | Validated live with `gcloud projects describe`, then checked for billing and the GKE API (`container.googleapis.com`), which the cluster step needs. A disabled GKE API can be enabled right there with `[e]`. Checks an explicit image registry when Docker is needed; the default regional registry is checked after cluster selection |
 | 4 | 🔗 Connect your cluster | Lists your GKE clusters with install-state badges, or creates a new one (1.37 on the Rapid channel by default; advanced setup can pick another version and channel). Clusters already running Substrate are protected by a reinstall guard |
 | 5 | ⚙️ Provision GCP resources | `setup-gcp bootstrap` — APIs, cluster (if new), per-cluster snapshot and micro-VM asset buckets, the snapshot transfer service account, IAM grants, monitoring dashboards, and an optional image repository. Idempotent |
-| 6 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router's client allowlist is set here too; see [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router). Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
-| 7 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
-| 8 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
-| 9 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
-| 10 | 🎬 Deploy a demo workload *(optional)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
+| 6 | 🔐 Allow ingress clients | `make run` asks for the SPIFFE IDs of the clients the ingress router admits, prefilled from an exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS`; what you enter replaces it. `make run-demo` sets the demo's driver pods instead. See [Reaching actors through the ingress router](#reaching-actors-through-the-ingress-router) |
+| 7 | 🚀 Turn on Substrate | `ate-setup deploy ate-system` — installs CRDs, the API server, controller, atenet, and atelet, plus the bundled Kubernetes Secrets credential provider for egress credential injection. Export `ATE_CREDENTIAL_PROVIDER` before starting the installer to choose another, e.g. `{"enabled":false}` to turn injection off. The ingress router gets the client allowlist from step 6. Snapshots are stored under the root of the per-cluster snapshot bucket (`SNAPSHOT_LOCATION=gs://<bucket>/`) |
+| 8 | 💾 Install Filestore CSI driver *(optional)* | Deploys the GCP Filestore CSI Driver configured for Substrate. If an existing cluster has GKE's managed Filestore driver on, this step turns it off first; skipping keeps it |
+| 9 | 📈 Configure autoscaling *(optional)* | Node-pool autoscaling via `gcloud` |
+| 10 | 📦 Choose your sandbox runtime *(optional)* | gVisor (installed with the control plane) or micro-VM — see [Sandbox runtimes](#sandbox-runtimes) |
+| 11 | 🎬 Deploy a demo workload *(`make run-demo` only)* | Upstream counter demo (`counter` on gVisor, or `counter-microvm` on micro-VM), plus live verification and next steps |
 
 > [!NOTE]
 > Exiting and re-running is safe; every step is idempotent. A cluster that already runs Substrate is blocked from reinstall by the wizard's guard (preventing broken, mixed-version states); the wizard offers an in-place teardown or points at [Upgrading an installed cluster](#upgrading-an-installed-cluster) instead.
@@ -102,7 +105,7 @@ A terminal wizard walks the ten steps below, running the real command it shows a
 
   New clusters are created at 1.37 on the Rapid channel, so none of this applies to them. Advanced setup can pick a newer version or a different channel, like Regular; the installer rejects a version below 1.37, checks with GKE that the channel offers the version, and warns if it doesn't.
 - **Filestore CSI driver** is optional and separate from autoscaling because configuring a Filestore VolumePool afterward is an additional step, not automatic.
-- **Sandbox runtime comes right before the demo** so steps 1–8 finish setting up the cluster, storage, and node pools first, and step 10 immediately deploys the matching demo (`counter` or `counter-microvm`).
+- **Sandbox runtime comes right before the demo** so steps 1–9 finish setting up the cluster, storage, and node pools first, and on `make run-demo` step 11 immediately deploys the matching demo (`counter` or `counter-microvm`).
 - **An existing cluster keeps its own network.** Provision's `setup-gcp bootstrap` warns when an existing cluster's network, subnetwork, or Dataplane V2 setting differs from what it's given, so the installer hands it the cluster's own values; the advanced track's network fields apply to new clusters only.
 
 </details>
@@ -218,20 +221,25 @@ is known before the install. Clients are the workloads that send requests to act
 usually your application's frontend or backend service. `kubectl ate` talks to the API
 server, not the router, and needs no entry; neither do Substrate's own components.
 
-The installer sets the allowlist when it turns Substrate on (step 6):
+The installer sets the allowlist at step 6, before it turns Substrate on. It is
+exported as `ATE_INGRESS_ALLOWED_SPIFFE_IDS` for the run, replacing any value you
+exported; the two lists are never merged.
 
-- It always lists the counter demos' driver pods,
-  `spiffe://cluster.local/ns/ate-demo-counter/sa/default` and
-  `spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default`. Both are listed
-  because the sandbox runtime and demo are chosen after step 6. This lets any pod
-  running as the default service account in those two namespaces reach any actor.
-- It appends whatever you export in `ATE_INGRESS_ALLOWED_SPIFFE_IDS`
-  (comma-separated) before starting the installer, for your own clients:
+- `make run` asks for your clients' IDs, comma-separated, and needs at least one.
+  An exported `ATE_INGRESS_ALLOWED_SPIFFE_IDS` prefills the field:
 
   ```bash
   export ATE_INGRESS_ALLOWED_SPIFFE_IDS=spiffe://cluster.local/ns/shop/sa/frontend
   make run
   ```
+
+- `make run-demo` uses the counter demos' driver pods,
+  `spiffe://cluster.local/ns/ate-demo-counter/sa/default` and
+  `spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default`, and says it
+  exports them on your behalf, warning if that replaces a value you exported. Both
+  are listed because the sandbox runtime, which decides the demo, is chosen after
+  step 6. Any pod running as the default service account in those two namespaces can
+  reach any actor.
 
 To add a client after the install, redeploy the router with the full list. Each deploy
 replaces the list rather than adding to it. From the substrate checkout, with the

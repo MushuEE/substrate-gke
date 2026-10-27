@@ -92,6 +92,10 @@ func key(s string) tea.Msg {
 	}
 }
 
+// testClientID stands in for a client SPIFFE ID typed at the IngressClients
+// step.
+const testClientID = "spiffe://cluster.local/ns/shop/sa/frontend"
+
 // testImageRepo and testImageTag stand in for a published image set. No
 // registry is published by default, so the pre-built track always types one.
 const (
@@ -177,7 +181,15 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.deps.Setup.ClusterIsNew {
 		t.Fatal("picked an existing cluster, ClusterIsNew must be false")
 	}
-	press("enter") // bootstrap finished (dry-run) → control plane starts
+	press("enter") // bootstrap finished (dry-run) → ingress clients
+	if app.mach.Current() != state.IngressClients {
+		t.Fatalf("after provision: %v", app.mach.Current())
+	}
+	typeText(t, app, testClientID)
+	press("enter") // → control plane starts
+	if app.deps.Setup.IngressAllowedSPIFFEIDs[0] != testClientID {
+		t.Fatalf("allowlist = %v, want %s", app.deps.Setup.IngressAllowedSPIFFEIDs, testClientID)
+	}
 	if app.mach.Current() != state.ControlPlane {
 		t.Fatalf("after provision: %v", app.mach.Current())
 	}
@@ -193,16 +205,12 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 	if app.mach.Current() != state.Sandbox {
 		t.Fatalf("after autoscaling: %v", app.mach.Current())
 	}
-	press("enter") // gVisor is the default choice → demo
-	if app.mach.Current() != state.Demo {
+	press("enter") // gVisor is the default choice → complete: `make run` has no demo step
+	if app.mach.Current() != state.Complete {
 		t.Fatalf("after sandbox: %v", app.mach.Current())
 	}
 	if app.deps.Setup.SandboxClass != state.SandboxGVisor {
 		t.Fatalf("SandboxClass = %q, want %q", app.deps.Setup.SandboxClass, state.SandboxGVisor)
-	}
-	press("2", "enter") // skip the demo
-	if app.mach.Current() != state.Complete {
-		t.Fatalf("after demo: %v", app.mach.Current())
 	}
 	if !app.Completed {
 		t.Fatal("Completed not set")
@@ -216,6 +224,8 @@ func TestDryRunWizardEndToEnd(t *testing.T) {
 // filestore CSI, and deploy of the demo.
 func TestCreateNewClusterPath(t *testing.T) {
 	app := testApp(t)
+	app.deps.Setup.DemoMode = true
+	app.mach.SetOrder(state.DemoOrder)
 	pump(t, app, tea.WindowSizeMsg{Width: 120, Height: 40})
 	for _, m := range runCmd(app.Init()) {
 		pump(t, app, m)
@@ -240,7 +250,7 @@ func TestCreateNewClusterPath(t *testing.T) {
 	if !app.deps.Setup.ClusterIsNew {
 		t.Fatal("ClusterIsNew must be true")
 	}
-	press("enter", "enter") // provision, control plane
+	press("enter", "enter", "enter") // provision, the demo drivers' IDs, control plane
 	if app.mach.Current() != state.FilestoreCSI {
 		t.Fatalf("after control plane: %v", app.mach.Current())
 	}
@@ -2991,6 +3001,7 @@ func TestDemoSummary(t *testing.T) {
 // the demo step after it deploys the counter-microvm demo.
 func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	app := testApp(t)
+	app.deps.Setup.DemoMode = true
 	press := pressToCluster(t, app)
 
 	// Pick row 1 (substrate-poc, which is KVMReady).
@@ -2998,8 +3009,8 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 	if !app.deps.Setup.ClusterKVMReady {
 		t.Fatal("ClusterKVMReady must be true for substrate-poc")
 	}
-	press("enter", "enter") // provision -> control plane -> filestore CSI
-	press("s", "s")         // skip filestore CSI and autoscaling -> sandbox
+	press("enter", "enter", "enter") // provision -> ingress clients (demo IDs) -> control plane -> filestore CSI
+	press("s", "s")                  // skip filestore CSI and autoscaling -> sandbox
 	if app.mach.Current() != state.Sandbox {
 		t.Fatalf("expected Sandbox step right after Autoscaling, got %v", app.mach.Current())
 	}
@@ -3025,6 +3036,8 @@ func TestMicroVMSandboxStepStagesAssetsAndDeploysMicroVMDemo(t *testing.T) {
 
 func TestSandboxStepSkipFailureAndNoKVMConfirmation(t *testing.T) {
 	jumpToSandbox := func(app *App) {
+		app.deps.Setup.DemoMode = true
+		app.mach.SetOrder(state.DemoOrder)
 		pump(t, app, tea.WindowSizeMsg{Width: 100, Height: 35})
 		for app.mach.Current() != state.Sandbox {
 			app.mach.Next()
@@ -3561,5 +3574,91 @@ func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
 		if !strings.Contains(bar, k) {
 			t.Errorf("hint bar lost %s: %q", k, bar)
 		}
+	}
+}
+
+// `make run` has no demo step; `make run-demo` ends with it. Both set the
+// ingress allowlist right before the control plane is turned on.
+func TestRunAndRunDemoFlows(t *testing.T) {
+	if slices.Contains(state.Order, state.Demo) {
+		t.Errorf("make run's flow has a demo step: %v", state.Order)
+	}
+	if !slices.Contains(state.DemoOrder, state.Demo) {
+		t.Errorf("make run-demo's flow has no demo step: %v", state.DemoOrder)
+	}
+	for _, order := range [][]state.Step{state.Order, state.DemoOrder} {
+		i := slices.Index(order, state.IngressClients)
+		if i < 0 || order[i+1] != state.ControlPlane {
+			t.Errorf("IngressClients must come right before ControlPlane: %v", order)
+		}
+	}
+	deps := &Deps{Setup: state.NewSetup(), Builder: snapshot.NewBuilder(t.TempDir(), false)}
+	deps.Setup.DemoMode = true
+	if got := NewApp(deps).mach.Order(); !slices.Equal(got, state.DemoOrder) {
+		t.Errorf("a demo run starts on %v, want DemoOrder", got)
+	}
+}
+
+// `make run`: the step asks for client IDs, prefilled from an exported
+// ATE_INGRESS_ALLOWED_SPIFFE_IDS, refuses an empty or malformed list, and
+// what is entered replaces the exported value.
+func TestIngressStepAsksForClientIDs(t *testing.T) {
+	const exported = "spiffe://cluster.local/ns/old/sa/default"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", exported)
+	deps := &Deps{Setup: state.NewSetup(), Builder: snapshot.NewBuilder(t.TempDir(), false)}
+	scr := newIngressScreen(deps)
+	scr.Init()
+	if got := scr.field.Value(); got != exported {
+		t.Errorf("field = %q, want it prefilled with %q", got, exported)
+	}
+	if view := flat(scr.View(120)); !strings.Contains(view, "Prefilled from your exported ATE_INGRESS_ALLOWED_SPIFFE_IDS") {
+		t.Errorf("the step does not say it was prefilled:\n%s", view)
+	}
+
+	scr.field.SetValue("")
+	if cmd := scr.Update(key("enter")); cmd != nil || !strings.Contains(scr.errText, "at least one") {
+		t.Errorf("an empty allowlist was accepted: err=%q", scr.errText)
+	}
+	scr.field.SetValue("not-a-spiffe-id")
+	if cmd := scr.Update(key("enter")); cmd != nil || !strings.Contains(scr.errText, "not a SPIFFE ID") {
+		t.Errorf("a malformed ID was accepted: err=%q", scr.errText)
+	}
+	scr.field.SetValue(testClientID)
+	if cmd := scr.Update(key("enter")); cmd == nil {
+		t.Fatal("a valid ID did not advance")
+	}
+	if !slices.Equal(deps.Setup.IngressAllowedSPIFFEIDs, []string{testClientID}) {
+		t.Errorf("allowlist = %v, want only the entered ID, not merged with %s", deps.Setup.IngressAllowedSPIFFEIDs, exported)
+	}
+}
+
+// `make run-demo`: the step shows the demo drivers' IDs read-only, says they
+// are exported on the user's behalf, and warns when that replaces an exported
+// ATE_INGRESS_ALLOWED_SPIFFE_IDS.
+func TestIngressStepOnADemoRun(t *testing.T) {
+	deps := &Deps{Setup: state.NewSetup(), Builder: snapshot.NewBuilder(t.TempDir(), false)}
+	deps.Setup.DemoMode = true
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", "")
+	scr := newIngressScreen(deps)
+	view := flat(scr.View(120))
+	for _, want := range append([]string{"exported as ATE_INGRESS_ALLOWED_SPIFFE_IDS on your behalf"}, snapshot.DemoClientSPIFFEIDs...) {
+		if !strings.Contains(view, want) {
+			t.Errorf("demo step lacks %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "is replaced for this run") {
+		t.Errorf("warned about an exported value that is not there:\n%s", view)
+	}
+
+	const exported = "spiffe://cluster.local/ns/old/sa/default"
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", exported)
+	if view := flat(scr.View(120)); !strings.Contains(view, exported) || !strings.Contains(view, "is replaced for this run") {
+		t.Errorf("no warning that the exported value is replaced:\n%s", view)
+	}
+	if cmd := scr.Update(key("enter")); cmd == nil {
+		t.Fatal("enter did not advance the demo step")
+	}
+	if !slices.Equal(deps.Setup.IngressAllowedSPIFFEIDs, snapshot.DemoClientSPIFFEIDs) {
+		t.Errorf("allowlist = %v, want only the demo drivers", deps.Setup.IngressAllowedSPIFFEIDs)
 	}
 }

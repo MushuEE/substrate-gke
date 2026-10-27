@@ -75,13 +75,21 @@ func TestStepNumbering(t *testing.T) {
 			t.Errorf("%v should not be numbered", s)
 		}
 	}
-	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, FilestoreCSI: 7, Autoscaling: 8, Sandbox: 9} {
+	for step, want := range map[Step]int{CheckSetup: 1, Images: 2, IngressClients: 6, FilestoreCSI: 8, Autoscaling: 9, Sandbox: 10} {
 		if n, ok := m.Position(step); !ok || n != want {
 			t.Errorf("Position(%v) = %d/%v, want %d/true", step, n, ok, want)
 		}
 	}
+	// `make run` has no demo step, so Sandbox is the last numbered one.
+	if n, ok := m.Position(Demo); ok {
+		t.Errorf("Position(Demo) = %d, but make run's flow has no demo step", n)
+	}
+	if n, _ := m.Position(Sandbox); n != m.NumberedSteps() {
+		t.Errorf("Position(Sandbox) = %d, want the last numbered step %d", n, m.NumberedSteps())
+	}
+	m.SetOrder(DemoOrder)
 	if n, _ := m.Position(Demo); n != m.NumberedSteps() {
-		t.Errorf("Position(Demo) = %d, want the last numbered step %d", n, m.NumberedSteps())
+		t.Errorf("on a demo run, Position(Demo) = %d, want the last numbered step %d", n, m.NumberedSteps())
 	}
 }
 

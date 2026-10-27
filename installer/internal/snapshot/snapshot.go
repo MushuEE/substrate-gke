@@ -24,6 +24,7 @@ package snapshot
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -425,9 +426,9 @@ func (b *Builder) hasCounterDriver() bool {
 
 // RouterNote explains how to reach actors through the Envoy router, which
 // admits only allowlisted clients.
-func (b *Builder) RouterNote() string {
+func (b *Builder) RouterNote(st *state.Setup) string {
 	return "The ingress router admits only clients that present a pod certificate on its allowlist (" +
-		IngressAllowlistSummary() + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
+		IngressAllowlistSummary(st) + "). To call actors from your own workloads, see " + b.RouterAuthURL() +
 		" and the substrate-gke README."
 }
 
@@ -888,7 +889,7 @@ func (b *Builder) DeployAteSystem(st *state.Setup) execx.Spec {
 		Label:   "ate-setup deploy ate-system",
 		Display: "go run ./cmd/ate-setup deploy ate-system" + display,
 		Argv:    b.inTree(b.withOverlay("go run ./cmd/ate-setup deploy ate-system" + argv)),
-		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(), dataplaneEnv()),
+		Env:     slices.Concat(b.env(st), credentialProviderEnv(), ingressAllowlistEnv(st), dataplaneEnv()),
 		SimLines: append(sim,
 			"[step]: deploy_k8s_credential_provider",
 			"[step]: Waiting for ATE system components to be ready...",
@@ -927,50 +928,57 @@ func credentialProviderEnv() []string {
 // (agent-substrate/substrate#3178). The pod identity signer issues
 // spiffe://cluster.local/ns/<namespace>/sa/<service-account>, with the trust
 // domain fixed; ate-setup fixes the demo namespaces, and the drivers run as
-// their namespace's default service account. Both are listed whatever demo
-// the run picks, because the allowlist is set when the control plane is
-// deployed, before the sandbox and demo steps.
+// their namespace's default service account. A demo run lists both, because
+// the allowlist is set when the control plane is deployed, before the
+// sandbox step decides which demo runs.
 var DemoClientSPIFFEIDs = []string{
 	"spiffe://cluster.local/ns/ate-demo-counter/sa/default",
 	"spiffe://cluster.local/ns/ate-demo-counter-microvm/sa/default",
 }
 
-// IngressAllowedSPIFFEIDs is the Envoy ingress router's client allowlist:
-// DemoClientSPIFFEIDs, then the caller's comma-separated
-// ATE_INGRESS_ALLOWED_SPIFFE_IDS, without duplicates. ate-setup reads the
-// variable as one value and does not combine it with anything, so the
-// installer joins the two lists itself. From Substrate v0.6.0, ate-setup
-// refuses to deploy the Envoy router without an allowlist; older trees ignore
-// it.
-func IngressAllowedSPIFFEIDs() []string {
-	ids := slices.Clone(DemoClientSPIFFEIDs)
-	for _, id := range strings.Split(os.Getenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS"), ",") {
-		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+// ParseSPIFFEIDs splits a comma-separated list of SPIFFE IDs, trimming each
+// and dropping empty entries, and checks every one is spiffe://<trust
+// domain>[/path]. The router matches IDs exactly, so a malformed one would
+// only ever refuse its client. At least one is required: from Substrate
+// v0.6.0, ate-setup refuses to deploy the Envoy router without an allowlist.
+func ParseSPIFFEIDs(value string) ([]string, error) {
+	var ids []string
+	for _, id := range strings.Split(value, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		u, err := url.Parse(id)
+		if err != nil || u.Scheme != "spiffe" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("%q is not a SPIFFE ID; want spiffe://<trust domain>/<path>, e.g. spiffe://cluster.local/ns/<namespace>/sa/<service-account>", id)
+		}
+		if !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
 	}
-	return ids
-}
-
-// callerSPIFFEIDs is how many of IngressAllowedSPIFFEIDs came from the caller.
-func callerSPIFFEIDs() int {
-	return len(IngressAllowedSPIFFEIDs()) - len(DemoClientSPIFFEIDs)
-}
-
-// IngressAllowlistSummary describes the allowlist for the control-plane
-// screen: the demo drivers, and how many identities the caller added.
-func IngressAllowlistSummary() string {
-	if n := callerSPIFFEIDs(); n > 0 {
-		return fmt.Sprintf("the counter demo drivers, plus %d from ATE_INGRESS_ALLOWED_SPIFFE_IDS", n)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("enter at least one client SPIFFE ID: ate-setup will not deploy the ingress router with an empty allowlist")
 	}
-	return "the counter demo drivers (add your own callers with ATE_INGRESS_ALLOWED_SPIFFE_IDS)"
+	return ids, nil
 }
 
-// ingressAllowlistEnv passes IngressAllowedSPIFFEIDs to ate-setup. It
-// replaces any ATE_INGRESS_ALLOWED_SPIFFE_IDS the caller exported, whose IDs
-// it already includes.
-func ingressAllowlistEnv() []string {
-	return []string{"ATE_INGRESS_ALLOWED_SPIFFE_IDS=" + strings.Join(IngressAllowedSPIFFEIDs(), ",")}
+// IngressAllowlistSummary describes st's allowlist for the control-plane
+// screen and the router note.
+func IngressAllowlistSummary(st *state.Setup) string {
+	if st.DemoMode {
+		return "the counter demos' driver pods"
+	}
+	if n := len(st.IngressAllowedSPIFFEIDs); n != 1 {
+		return fmt.Sprintf("the %d client identities you entered", n)
+	}
+	return "the client identity you entered"
+}
+
+// ingressAllowlistEnv passes st's allowlist to ate-setup, replacing any
+// ATE_INGRESS_ALLOWED_SPIFFE_IDS the caller exported: the IngressClients step
+// prefilled from it, and what the user confirmed there is what counts.
+func ingressAllowlistEnv(st *state.Setup) []string {
+	return []string{"ATE_INGRESS_ALLOWED_SPIFFE_IDS=" + strings.Join(st.IngressAllowedSPIFFEIDs, ",")}
 }
 
 // craneDigest prints an image reference's registry digest. It must stay in

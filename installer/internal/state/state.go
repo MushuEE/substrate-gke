@@ -37,6 +37,7 @@ const (
 	Project
 	Cluster
 	Provision
+	IngressClients
 	ControlPlane
 	Sandbox
 	FilestoreCSI
@@ -59,14 +60,35 @@ const (
 // the network — it resolves a revision against a git remote — and the doctor
 // is what reports a missing git or an unreachable network with a fix to paste.
 //
-// Sandbox comes after Autoscaling and right before Demo: the steps before it
-// finish the cluster, control-plane, storage, and node-pool setup, then it
-// chooses the actor sandbox runtime (staging the micro-VM assets and applying
-// the microvm SandboxConfig when Micro-VM is chosen) right before Demo
-// deploys the matching demo workload.
+// IngressClients comes right before ControlPlane, which hands its SPIFFE IDs
+// to ate-setup as the ingress router's allowlist.
+//
+// Sandbox comes after Autoscaling: the steps before it finish the cluster,
+// control-plane, storage, and node-pool setup, then it chooses the actor
+// sandbox runtime (staging the micro-VM assets and applying the microvm
+// SandboxConfig when Micro-VM is chosen).
+//
+// Order has no demo step: `make run` installs Substrate for your own
+// workloads. DemoOrder, for `make run-demo`, adds Demo after Sandbox, which
+// deploys the counter demo matching the chosen runtime.
 var Order = []Step{
 	Welcome, CheckSetup, Images, Project, Cluster, Provision,
-	ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
+	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Complete,
+}
+
+// DemoOrder is the install flow of a demo run (--demo, `make run-demo`).
+var DemoOrder = []Step{
+	Welcome, CheckSetup, Images, Project, Cluster, Provision,
+	IngressClients, ControlPlane, FilestoreCSI, Autoscaling, Sandbox, Demo, Complete,
+}
+
+// InstallOrder is the install flow for a run, DemoOrder for a demo run and
+// Order otherwise.
+func InstallOrder(demo bool) []Step {
+	if demo {
+		return DemoOrder
+	}
+	return Order
 }
 
 // UpgradeOrder is the flow for upgrading a cluster this installer set up. It
@@ -94,6 +116,8 @@ func (s Step) Title() string {
 		return "Connect your cluster"
 	case Provision:
 		return "Provision GCP resources"
+	case IngressClients:
+		return "Allow ingress clients"
 	case ControlPlane:
 		return "Turn on Substrate"
 	case Sandbox:
@@ -225,6 +249,15 @@ const (
 // Setup accumulates everything the user chose plus values resolved from GCP.
 type Setup struct {
 	Track string
+
+	// DemoMode is a demo run (--demo, `make run-demo`): the flow ends with
+	// the demo step, and the ingress allowlist is the demo drivers'
+	// identities.
+	DemoMode bool
+	// IngressAllowedSPIFFEIDs is the ingress router's client allowlist,
+	// passed to ate-setup as ATE_INGRESS_ALLOWED_SPIFFE_IDS. The
+	// IngressClients step sets it.
+	IngressAllowedSPIFFEIDs []string
 
 	// Upgrade selects the upgrade track: the cluster is already installed,
 	// and the run prepares upstream's rolling upgrade instead of installing.
