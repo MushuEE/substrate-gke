@@ -198,38 +198,53 @@ func nodeSysctlsConfigured(cluster *containerpb.Cluster) bool {
 	return false
 }
 
-// podCertificateProjectionGAMinor is the first Kubernetes 1.x minor whose
-// kubelet serves pod certificate projection without a feature gate.
-const podCertificateProjectionGAMinor = 37
+// minSupportedMinor is the oldest Kubernetes 1.x minor Agent Substrate is
+// supported on, for the control plane and for every node pool. Node pools are
+// checked because GKE lets them trail the control plane, and a kubelet below
+// 1.37 serves pod certificate projection only behind the beta gate: pods with
+// a pod certificate volume on such a node fail with "MountVolume.SetUp failed:
+// unimplemented".
+const minSupportedMinor = 37
 
-// nodePoolsWithoutPodCertificateProjection returns the pools whose nodes will
-// not mount pod certificate volumes after the beta APIs are turned on in place.
-//
-// Turning the APIs on is a control-plane change, and it is enough on its own:
-// the APIs are served afterward. But projection is a kubelet feature, gated
-// through 1.36, and a kubelet that was already running when the APIs were
-// turned on never picks it up. Pods with a pod certificate volume scheduled
-// onto such a node fail with "MountVolume.SetUp failed: unimplemented" while
-// the control plane looks healthy. Nodes created afterward are fine, as is
-// any kubelet on 1.37 or later, where projection is GA.
-//
-// It is the pool's version that decides this, not the control plane's: a 1.37
-// control plane can still be running 1.36 nodes. A version that cannot be
-// parsed is reported too, since a spurious warning costs far less than a
-// silent mount failure.
-func nodePoolsWithoutPodCertificateProjection(cluster *containerpb.Cluster) []*containerpb.NodePool {
-	var stale []*containerpb.NodePool
-	for _, pool := range cluster.GetNodePools() {
-		if minor, ok := kubernetesMinor(pool.GetVersion()); ok && minor >= podCertificateProjectionGAMinor {
-			continue
-		}
-		stale = append(stale, pool)
+// validateClusterVersion rejects a requested version below minSupportedMinor.
+// An empty or unparseable value is left for GKE to judge.
+func validateClusterVersion(cfg *Config) error {
+	if minor, ok := kubernetesMinor(cfg.ClusterVersion); ok && minor < minSupportedMinor {
+		return fmt.Errorf("cluster version %q is below 1.%d, the oldest release Agent Substrate supports", cfg.ClusterVersion, minSupportedMinor)
 	}
-	return stale
+	return nil
+}
+
+// checkExistingClusterVersions returns an error if an existing cluster's
+// control plane or any of its node pools runs below minSupportedMinor. It runs
+// before any update, so a rejected cluster is left untouched. A version that
+// cannot be parsed is not reported.
+func checkExistingClusterVersions(cfg *Config, cluster *containerpb.Cluster) error {
+	if minor, ok := kubernetesMinor(cluster.GetCurrentMasterVersion()); ok && minor < minSupportedMinor {
+		return fmt.Errorf("cluster %s control plane runs %s, below 1.%d, the oldest release Agent Substrate supports; upgrade the control plane, then every node pool below 1.%d: gcloud container clusters upgrade %s --master --cluster-version=1.%d --project=%s --location=%s",
+			cfg.ClusterName, cluster.GetCurrentMasterVersion(), minSupportedMinor, minSupportedMinor,
+			cfg.ClusterName, minSupportedMinor, cfg.ProjectID, cfg.ClusterLocation)
+	}
+	var old []string
+	for _, pool := range cluster.GetNodePools() {
+		if minor, ok := kubernetesMinor(pool.GetVersion()); ok && minor < minSupportedMinor {
+			old = append(old, fmt.Sprintf("%s (%s)", pool.GetName(), pool.GetVersion()))
+			slog.Error("Node pool is below the oldest release Agent Substrate supports; upgrade it to the control plane's version",
+				slog.String("node_pool", pool.GetName()),
+				slog.String("version", pool.GetVersion()),
+				slog.String("upgrade", fmt.Sprintf("gcloud container clusters upgrade %s --node-pool=%s --project=%s --location=%s",
+					cfg.ClusterName, pool.GetName(), cfg.ProjectID, cfg.ClusterLocation)))
+		}
+	}
+	if len(old) > 0 {
+		return fmt.Errorf("cluster %s has node pools below 1.%d, the oldest release Agent Substrate supports: %s",
+			cfg.ClusterName, minSupportedMinor, strings.Join(old, ", "))
+	}
+	return nil
 }
 
 // kubernetesMinor extracts the minor from a GKE version such as
-// "1.36.4-gke.1247000". It only understands Kubernetes 1.x.
+// "1.37.1-gke.1000000". It only understands Kubernetes 1.x.
 func kubernetesMinor(version string) (int, bool) {
 	major, rest, ok := strings.Cut(version, ".")
 	if !ok || major != "1" {
@@ -241,76 +256,6 @@ func kubernetesMinor(version string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// replacementNodePoolCommand is the command that adds a pool to take over
-// from one whose nodes predate the beta APIs. A new pool is the remedy because
-// it is the one GKE operation that is certain to produce new kubelets: an
-// upgrade to the version a pool already runs is skipped outright, and a pool
-// can only be upgraded forward when GKE happens to offer a newer patch.
-//
-// It copies what this tool sets on the pools it creates, so for a cluster
-// this tool made the new pool is equivalent. Anything else customized on the
-// old pool (taints, service account, autoscaling) has to be carried over by
-// hand, which the warning says.
-func replacementNodePoolCommand(cfg *Config, pool *containerpb.NodePool) string {
-	nodeConfig := pool.GetConfig()
-	args := []string{
-		"gcloud container node-pools create " + replacementNodePoolName(pool.GetName()),
-		"--cluster=" + cfg.ClusterName,
-		"--project=" + cfg.ProjectID,
-		"--location=" + cfg.ClusterLocation,
-		"--node-version=" + pool.GetVersion(),
-		"--machine-type=" + nodeConfig.GetMachineType(),
-		fmt.Sprintf("--num-nodes=%d", max(pool.GetInitialNodeCount(), 1)),
-	}
-	if nodeConfig.GetDiskSizeGb() > 0 {
-		args = append(args, fmt.Sprintf("--disk-size=%d", nodeConfig.GetDiskSizeGb()))
-	}
-	if nodeConfig.GetDiskType() != "" {
-		args = append(args, "--disk-type="+nodeConfig.GetDiskType())
-	}
-	// --boot-disk-provisioned-iops and --boot-disk-provisioned-throughput are
-	// set together, so a pool created with them carries both.
-	if bootDisk := nodeConfig.GetBootDisk(); bootDisk.GetProvisionedIops() > 0 {
-		args = append(args,
-			fmt.Sprintf("--boot-disk-provisioned-iops=%d", bootDisk.GetProvisionedIops()),
-			fmt.Sprintf("--boot-disk-provisioned-throughput=%d", bootDisk.GetProvisionedThroughput()))
-	}
-	if nodeConfig.GetAdvancedMachineFeatures().GetEnableNestedVirtualization() {
-		args = append(args, "--enable-nested-virtualization")
-	}
-	return strings.Join(args, " ")
-}
-
-// replacementNodePoolName derives a name for the replacement pool. GKE caps
-// pool names at 40 characters.
-func replacementNodePoolName(name string) string {
-	const suffix = "-2"
-	if len(name)+len(suffix) > 40 {
-		name = strings.TrimRight(name[:40-len(suffix)], "-")
-	}
-	return name + suffix
-}
-
-// deleteNodePoolCommand removes the old pool once its workloads have moved.
-func deleteNodePoolCommand(cfg *Config, pool *containerpb.NodePool) string {
-	return fmt.Sprintf("gcloud container node-pools delete %s --cluster=%s --project=%s --location=%s",
-		pool.GetName(), cfg.ClusterName, cfg.ProjectID, cfg.ClusterLocation)
-}
-
-// warnNodePoolsWithoutPodCertificateProjection is called after this tool has
-// turned the beta APIs on for an existing cluster. Replacing a pool moves
-// running workloads, so it is left to the user rather than done here.
-func warnNodePoolsWithoutPodCertificateProjection(cfg *Config, cluster *containerpb.Cluster) {
-	for _, pool := range nodePoolsWithoutPodCertificateProjection(cluster) {
-		slog.Warn("Node pool predates the beta APIs and its nodes cannot mount pod certificate volumes; replace it with a new pool, copying over any settings of its own such as taints, service account, or autoscaling",
-			slog.String("cluster", cfg.ClusterName),
-			slog.String("node_pool", pool.GetName()),
-			slog.String("version", pool.GetVersion()),
-			slog.String("create_replacement", replacementNodePoolCommand(cfg, pool)),
-			slog.String("then_delete_old", deleteNodePoolCommand(cfg, pool)))
-	}
 }
 
 func createClusterInternal(ctx context.Context, cfg *Config, client *container.ClusterManagerClient, parent string) error {
@@ -349,10 +294,18 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 			return fmt.Errorf("getting cluster: %w", err)
 		}
 
+		// Only on the creation path: the version is ignored for an existing
+		// cluster, which checkExistingClusterVersions covers instead.
+		if err := validateClusterVersion(cfg); err != nil {
+			return err
+		}
 		return createClusterInternal(ctx, cfg, client, parent)
 	}
 
 	slog.Info("Cluster exists. Checking attributes...", slog.String("cluster", cfg.ClusterName))
+	if err := checkExistingClusterVersions(cfg, cluster); err != nil {
+		return err
+	}
 
 	// Network, subnetwork, and Dataplane V2 are fixed at cluster creation.
 	// Changing them means deleting the cluster and everything running on it,
@@ -436,7 +389,6 @@ func createClusterIdempotent(ctx context.Context, cfg *Config) error {
 		if err := waitContainerOperation(ctx, client, op.Name, cfg); err != nil {
 			return err
 		}
-		warnNodePoolsWithoutPodCertificateProjection(cfg, cluster)
 	} else {
 		slog.Info("Cluster EnableK8SBetaApis match perfectly.", slog.String("cluster", cfg.ClusterName))
 	}

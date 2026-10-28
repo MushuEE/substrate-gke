@@ -821,52 +821,72 @@ func TestBuildCreateClusterRequest_ReleaseChannel(t *testing.T) {
 	}
 }
 
-func TestNodePoolsWithoutPodCertificateProjection(t *testing.T) {
+func TestValidateClusterVersion(t *testing.T) {
+	for _, tt := range []struct {
+		version string
+		wantErr bool
+	}{
+		{version: ""},
+		{version: "latest"},
+		{version: "1.37"},
+		{version: "1.37.1-gke.1000000"},
+		{version: "1.38"},
+		{version: "1.36", wantErr: true},
+		{version: "1.35.8-gke.1225000", wantErr: true},
+	} {
+		t.Run(tt.version, func(t *testing.T) {
+			err := validateClusterVersion(&Config{ClusterVersion: tt.version})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateClusterVersion(%q) = %v, wantErr %v", tt.version, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// The control plane and every node pool are held to 1.37: GKE lets pools
+// trail the control plane, and a kubelet below 1.37 cannot mount pod
+// certificates without the beta gate.
+func TestCheckExistingClusterVersions(t *testing.T) {
+	cfg := &Config{ProjectID: "my-project", ClusterName: "substrate-poc", ClusterLocation: "us-west1-c"}
 	pool := func(name, version string) *containerpb.NodePool {
 		return &containerpb.NodePool{Name: name, Version: version}
 	}
 	tests := []struct {
-		name  string
-		pools []*containerpb.NodePool
-		want  []string
+		name    string
+		cluster *containerpb.Cluster
+		wantErr string
 	}{
 		{
-			name:  "1.36 pool needs its nodes recreated",
-			pools: []*containerpb.NodePool{pool("default-pool", "1.36.4-gke.1247000")},
-			want:  []string{"default-pool"},
+			name: "1.37 throughout",
+			cluster: &containerpb.Cluster{CurrentMasterVersion: "1.37.1-gke.1000000",
+				NodePools: []*containerpb.NodePool{pool("default-pool", "1.37.1-gke.1000000")}},
 		},
 		{
-			name:  "1.37 pool is fine, projection is GA in its kubelet",
-			pools: []*containerpb.NodePool{pool("default-pool", "1.37.0-gke.3503000")},
+			name:    "1.36 control plane",
+			cluster: &containerpb.Cluster{CurrentMasterVersion: "1.36.4-gke.1247000"},
+			wantErr: "control plane runs 1.36.4-gke.1247000",
 		},
 		{
-			// A 1.37 control plane does not help 1.36 kubelets, so only the
-			// old pool is reported.
-			name: "only the pools below 1.37 are reported",
-			pools: []*containerpb.NodePool{
-				pool("old", "1.36.4-gke.1247000"),
-				pool("new", "1.37.0-gke.3503000"),
-			},
-			want: []string{"old"},
+			name: "1.37 control plane, one 1.36 pool",
+			cluster: &containerpb.Cluster{CurrentMasterVersion: "1.37.1-gke.1000000",
+				NodePools: []*containerpb.NodePool{pool("old", "1.36.4-gke.1247000"), pool("new", "1.37.1-gke.1000000")}},
+			wantErr: "node pools below 1.37, the oldest release Agent Substrate supports: old (1.36.4-gke.1247000)",
 		},
 		{
-			name:  "an unreadable version is reported rather than assumed fine",
-			pools: []*containerpb.NodePool{pool("mystery", "")},
-			want:  []string{"mystery"},
-		},
-		{
-			name: "no pools, nothing to report",
+			name: "unreadable versions are left alone",
+			cluster: &containerpb.Cluster{CurrentMasterVersion: "",
+				NodePools: []*containerpb.NodePool{pool("mystery", "")}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got []string
-			for _, p := range nodePoolsWithoutPodCertificateProjection(&containerpb.Cluster{NodePools: tt.pools}) {
-				got = append(got, p.GetName())
-			}
-			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
-				t.Errorf("got %v, want %v", got, tt.want)
+			err := checkExistingClusterVersions(cfg, tt.cluster)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("got %v, want no error", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Errorf("got %v, want an error containing %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -897,81 +917,3 @@ func TestKubernetesMinor(t *testing.T) {
 	}
 }
 
-func TestReplacementNodePoolCommand(t *testing.T) {
-	cfg := &Config{ProjectID: "my-project", ClusterName: "substrate-poc", ClusterLocation: "us-west1-c"}
-	tests := []struct {
-		name string
-		pool *containerpb.NodePool
-		want string
-	}{
-		{
-			name: "a pool this tool created carries its disk and nested virtualization over",
-			pool: &containerpb.NodePool{
-				Name:             "substrate-node-pool",
-				Version:          "1.36.4-gke.1247000",
-				InitialNodeCount: 2,
-				Config: &containerpb.NodeConfig{
-					MachineType:             "c3-standard-4",
-					DiskSizeGb:              500,
-					DiskType:                "pd-balanced",
-					AdvancedMachineFeatures: &containerpb.AdvancedMachineFeatures{EnableNestedVirtualization: proto.Bool(true)},
-				},
-			},
-			want: "gcloud container node-pools create substrate-node-pool-2 --cluster=substrate-poc --project=my-project --location=us-west1-c --node-version=1.36.4-gke.1247000 --machine-type=c3-standard-4 --num-nodes=2 --disk-size=500 --disk-type=pd-balanced --enable-nested-virtualization",
-		},
-		{
-			// Autoscaled pools can report zero; a pool with no nodes would
-			// leave nothing for the workloads to move to.
-			name: "defaults stay defaults, and the pool gets at least one node",
-			pool: &containerpb.NodePool{
-				Name:    "default-pool",
-				Version: "1.36.4-gke.1082000",
-				Config:  &containerpb.NodeConfig{MachineType: "e2-standard-4"},
-			},
-			want: "gcloud container node-pools create default-pool-2 --cluster=substrate-poc --project=my-project --location=us-west1-c --node-version=1.36.4-gke.1082000 --machine-type=e2-standard-4 --num-nodes=1",
-		},
-		{
-			name: "provisioned boot disk performance carries over",
-			pool: &containerpb.NodePool{
-				Name:             "substrate-node-pool",
-				Version:          "1.36.4-gke.1247000",
-				InitialNodeCount: 1,
-				Config: &containerpb.NodeConfig{
-					MachineType: "c4-standard-8",
-					DiskSizeGb:  200,
-					DiskType:    "hyperdisk-balanced",
-					BootDisk:    &containerpb.BootDisk{DiskType: "hyperdisk-balanced", SizeGb: 200, ProvisionedIops: 6000, ProvisionedThroughput: 400},
-				},
-			},
-			want: "gcloud container node-pools create substrate-node-pool-2 --cluster=substrate-poc --project=my-project --location=us-west1-c --node-version=1.36.4-gke.1247000 --machine-type=c4-standard-8 --num-nodes=1 --disk-size=200 --disk-type=hyperdisk-balanced --boot-disk-provisioned-iops=6000 --boot-disk-provisioned-throughput=400",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := replacementNodePoolCommand(cfg, tt.pool); got != tt.want {
-				t.Errorf("got  %q\nwant %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestReplacementNodePoolNameFitsGKELimit(t *testing.T) {
-	long := strings.Repeat("a", 39) + "-b"
-	got := replacementNodePoolName(long)
-	if len(got) > 40 {
-		t.Errorf("replacementNodePoolName(%q) = %q, %d characters; GKE allows 40", long, got, len(got))
-	}
-	if got == long {
-		t.Errorf("replacement pool name %q collides with the original", got)
-	}
-}
-
-func TestDeleteNodePoolCommand(t *testing.T) {
-	cfg := &Config{ProjectID: "my-project", ClusterName: "substrate-poc", ClusterLocation: "us-west1-c"}
-	got := deleteNodePoolCommand(cfg, &containerpb.NodePool{Name: "substrate-node-pool"})
-	want := "gcloud container node-pools delete substrate-node-pool --cluster=substrate-poc --project=my-project --location=us-west1-c"
-	if got != want {
-		t.Errorf("got  %q\nwant %q", got, want)
-	}
-}

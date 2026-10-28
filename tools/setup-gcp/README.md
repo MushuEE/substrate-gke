@@ -88,52 +88,20 @@ they differ; the tool never deletes or recreates an existing cluster.
 > ClusterTrustBundle discovery prefers `certificates.k8s.io/v1`, falling back
 > to `certificates.k8s.io/v1beta1` only when the stable resource is not served.
 > PodCertificateRequest discovery independently prefers `v1` over `v1beta1`.
-> GKE 1.37 and higher serve both under `v1` by default. GKE 1.36 serves them
-> only under `v1beta1`, as beta APIs that must be enabled. Versions below 1.36
-> are not supported.
+> GKE 1.37 and higher serve both under `v1` by default.
 >
-> `create cluster` enables the beta APIs on every cluster it creates, whatever
-> its version. If you bring your own 1.36 cluster, create it with them:
->
-> ```bash
-> gcloud container clusters create "${CLUSTER_NAME}" ... \
->   --enable-kubernetes-unstable-apis=certificates.k8s.io/v1beta1/podcertificaterequests,certificates.k8s.io/v1beta1/clustertrustbundles
-> ```
->
-> A 1.36 cluster created without them can be fixed in place: `create cluster`
-> and `bootstrap` turn them on for an existing cluster, or run `gcloud
-> container clusters update` with the same flag yourself. The APIs are served
-> once the update finishes. **That is not enough on its own:** pod
-> certificate projection is a kubelet feature, gated through 1.36, and nodes
-> that were already running do not pick it up. Pods scheduled onto them fail
-> with `MountVolume.SetUp failed: unimplemented`. Replace each such pool:
-> create a new one, let workloads move to it, then delete the old one. The
-> tool logs both commands for every pool it finds, with the new pool's
-> machine type, disk (including provisioned boot disk IOPS and throughput),
-> node count and nested virtualization copied from the old one; carry over
-> anything else you customized (taints, service account, autoscaling)
-> yourself:
->
-> ```bash
-> gcloud container node-pools create "${NODE_POOL}-2" --cluster="${CLUSTER_NAME}" \
->   --location="${CLUSTER_LOCATION}" --machine-type="${NODE_MACHINE_TYPE}" ...
-> gcloud container node-pools delete "${NODE_POOL}" --cluster="${CLUSTER_NAME}" \
->   --location="${CLUSTER_LOCATION}"
-> ```
->
-> Upgrading a pool to the version it already runs does **not** help: GKE
-> skips a same-version upgrade without recreating any nodes. Node pools on
-> 1.37 or higher need nothing further.
->
-> The symptom of a cluster without the APIs: the install hangs at "Waiting for
-> podcertificate ClusterTrustBundles to be ready" and `kubectl get
-> clustertrustbundles` reports the resource type is not served.
+> GKE 1.37 is the minimum supported version, for the control plane and for
+> every node pool. For an existing cluster, `create cluster` and `bootstrap`
+> stop before changing anything if the control plane or any node pool runs
+> below 1.37, and log the upgrade command for each pool. A `--cluster-version`
+> below 1.37 is rejected. Leaving it empty takes the channel's default
+> version, which can be below 1.37 (Regular's is today), so set it.
 
 Which versions you can ask for depends on the release channel, so
 `--cluster-version` often needs `--release-channel` beside it. A channel only
 serves the versions it currently carries — at the time of writing, 1.37 is in
-Rapid alone — and a `--cluster-version` the channel does not carry is rejected
-by GKE. Leaving `--release-channel` empty is not the same as passing `none`:
+Rapid and Regular — and a `--cluster-version` the channel does not carry is
+rejected by GKE. Leaving `--release-channel` empty is not the same as passing `none`:
 empty sends no channel at all, so GKE applies its default (Regular today),
 while `none` explicitly unenrolls the cluster from release channels.
 

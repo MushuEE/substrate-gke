@@ -320,18 +320,17 @@ func TestClusterSelectionUpdatesDerivedBucket(t *testing.T) {
 	press("enter") // images: pre-built
 	typeReleaseImages(t, app)
 	press("enter", "enter", "enter") // project fields (pid, zone, bucket)
-	// Pick row 2: legacy-prod (lacks beta APIs, requires 'y' confirmation)
-	press("2", "enter")
-	press("y")
+	// Pick row 4: substrate-ga (ready, goes straight through)
+	press("4", "enter")
 
-	if app.deps.Setup.ClusterName != "legacy-prod" {
-		t.Fatalf("ClusterName = %q, want legacy-prod", app.deps.Setup.ClusterName)
+	if app.deps.Setup.ClusterName != "substrate-ga" {
+		t.Fatalf("ClusterName = %q, want substrate-ga", app.deps.Setup.ClusterName)
 	}
 	// The cluster name is part of the derivation: two clusters in one
 	// project and zone must never share a snapshot bucket. The full
 	// derivation has 58 characters, past setup-gcp's 56, so it is truncated
 	// and suffixed with a hash.
-	wantBucket := "ate-snapshots-my-substrate-project-legacy-prod-41bf0e33"
+	wantBucket := "ate-snapshots-my-substrate-project-substrate-ga-81bde5bb"
 	if app.deps.Setup.BucketName != wantBucket {
 		t.Fatalf("BucketName = %q, want %q", app.deps.Setup.BucketName, wantBucket)
 	}
@@ -2031,7 +2030,7 @@ func networkScreen(t *testing.T, c gcp.Cluster) (*clusterScreen, func(tea.Msg)) 
 // three differences that are not problems.
 func TestChoosingAnExistingClusterRecordsItsOwnNetwork(t *testing.T) {
 	s, drive := networkScreen(t, gcp.Cluster{
-		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.37.1-gke.1000000",
 		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, DataplaneV2: true,
 		Network:    "projects/acme/global/networks/default",
 		Subnetwork: "projects/acme/regions/us-central1/subnetworks/gke-prod-subnet-55edbf1e",
@@ -2082,7 +2081,7 @@ func TestTheManagedFilestoreDriverIsNotTurnedOffSilently(t *testing.T) {
 // survive into the create path.
 func TestChoosingAClusterRecordsItsFilestoreAddon(t *testing.T) {
 	s, drive := networkScreen(t, gcp.Cluster{
-		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000",
+		Name: "prod", Location: "us-central1-a", Status: "RUNNING", MasterVersion: "1.37.1-gke.1000000",
 		NodeCount: 3, BetaAPIs: gcp.RequiredBetaAPIs, FilestoreCSIAddon: true,
 	})
 	drive(key("enter"))
@@ -2098,14 +2097,11 @@ func flat(view string) string {
 	return strings.Join(strings.Fields(strings.NewReplacer("│", " ", "╭", " ", "╮", " ", "╰", " ", "╯", " ", "─", " ").Replace(view)), " ")
 }
 
-// What a cluster without the beta APIs is told depends on its release, and
-// the cases are materially different. On 1.37 throughout it needs nothing:
-// Substrate uses the v1 APIs there. Below 1.36 nothing that can be enabled
-// makes the cluster supported. In between, the repair works but costs
-// replacing the pools below 1.37. Offering the wrong one sends someone to
-// rebuild a cluster that needed ten minutes, or leaves them watching pods
-// that will never mount.
-func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
+// A cluster below the floor is rejected, and what it is told to upgrade
+// depends on which part is below it: GKE upgrades node pools only up to the
+// control plane's version, so an old control plane has to move first. A 1.37
+// cluster throughout goes straight to provision whatever its beta APIs.
+func TestRejectionNamesWhatToUpgrade(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
 
@@ -2117,102 +2113,52 @@ func TestConfirmationOffersTheRemedyForTheRelease(t *testing.T) {
 	app = testApp(t)
 	press = pressToCluster(t, app)
 	scr := app.cur.(*clusterScreen)
-	press("3", "enter") // ml-staging: 1.36 pools, no beta APIs enabled
+	press("3", "enter") // ml-staging: 1.37 control plane, 1.36 pools
 	if scr.mode != "confirm" {
-		t.Fatalf("1.36 cluster: mode=%q, want the confirmation", scr.mode)
+		t.Fatalf("1.36 pools: mode=%q, want the rejection", scr.mode)
 	}
-	// Never an upgrade to the version the pool already runs: that is the
-	// command anyone would reach for, and GKE skips it without replacing a
-	// node, so the pods keep failing to mount.
+	floor := gcp.MinSupportedRelease.String()
 	view := flat(scr.View(120))
-	if !strings.Contains(view, "2 node pools run below "+gcp.PodCertificateGARelease.String()+" and must be replaced before Substrate starts") {
-		t.Errorf("a 1.36 confirmation should say the pools must be replaced before Substrate starts:\n%s", view)
+	if !strings.Contains(view, "2 node pools run below "+floor+": default-pool, gpu-pool.") || !strings.Contains(view, "Upgrade them to "+floor) {
+		t.Errorf("the rejection should name the old pools and ask for their upgrade:\n%s", view)
 	}
-	if strings.Contains(view, "clusters upgrade") {
-		t.Errorf("a 1.36 confirmation must not offer a same-version upgrade, which GKE skips:\n%s", view)
+	// 'y' used to choose the cluster anyway. Bootstrap refuses a cluster
+	// below the floor, so nothing can be chosen here.
+	before := app.deps.Setup.ClusterName
+	press("y")
+	if scr.mode != "list" || app.deps.Setup.ClusterName != before {
+		t.Errorf("'y' on the rejection: mode=%q cluster=%q, want the list and nothing chosen", scr.mode, app.deps.Setup.ClusterName)
 	}
 
-	press("n")          // back to the list
-	press("2", "enter") // legacy-prod: 1.33, below the supported floor
+	press("2", "enter") // legacy-prod: 1.33 control plane
 	if scr.mode != "confirm" {
-		t.Fatalf("1.33 cluster: mode=%q, want the confirmation", scr.mode)
+		t.Fatalf("1.33 cluster: mode=%q, want the rejection", scr.mode)
 	}
 	view = flat(scr.View(120))
-	if !strings.Contains(view, "Upgrade its control plane to "+gcp.MinSupportedRelease.String()) {
-		t.Errorf("a pre-%s confirmation should ask for a control-plane upgrade:\n%s", gcp.MinSupportedRelease, view)
+	if !strings.Contains(view, "Upgrade its control plane, then any node pool below "+floor) {
+		t.Errorf("a pre-%s control plane should be asked to upgrade first:\n%s", floor, view)
 	}
-	// Enabling the beta APIs is not the fix below the floor: on 1.33 GKE
-	// rejects the request outright, and even where it would be accepted the
-	// release is not one Substrate runs on. 'y' still works, but must not be
-	// sold as the way through.
-	if strings.Contains(view, "has provision turn them on") {
-		t.Errorf("a pre-%s confirmation must not offer enablement as the fix:\n%s", gcp.MinSupportedRelease, view)
-	}
-	if !strings.Contains(flat(app.View()), "use it anyway (unsupported)") {
-		t.Errorf("a pre-%s confirmation should mark 'y' as unsupported:\n%s", gcp.MinSupportedRelease, app.View())
+	if hints := scr.Hints(); len(hints) != 1 || hints[0].Key != "esc" {
+		t.Errorf("the rejection should offer only esc: %+v", hints)
 	}
 }
 
-// The panels a cluster without the beta APIs leads to have to be readable in
-// a small terminal, beside the sidebar. At 80×24 the first version was clamped
-// after its first lines, hiding every remedy and the commands, and wrapped API
-// names mid-word; then the replacement block lost its last command line once a
-// cluster had a third pool. The confirmation's bottom border and the block's
-// last command line are what get cut first, so those are what is checked, for
-// one to eight pools and both the certain and the advisory wording, and a
-// split pool name is checked for directly.
-//
-// One walk per size, not one per check: a walk costs ~6 s, and the screens
-// under test are reachable from one another with a few keys.
-func TestConfirmAndReplacementPanelsFitSmallTerminals(t *testing.T) {
-	pools := []string{"default-pool", "gpu-pool", "highmem-pool", "batch-workers", "spot-pool", "ingress-nodes", "kvm-pool-2", "system-pool"}
+// The rejection panel has to be readable in a small terminal, beside the
+// sidebar: at 80×24 an earlier version was clamped after its first lines,
+// hiding the remedy. Its bottom border is what gets cut first, so that is
+// what is checked.
+func TestRejectionPanelFitsSmallTerminals(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
 		app := testApp(t)
 		press := pressToCluster(t, app)
 		pump(t, app, tea.WindowSizeMsg{Width: size[0], Height: size[1]})
-		for _, row := range []string{"2", "3"} { // the two confirmations
+		for _, row := range []string{"2", "3"} { // the two rejections
 			press(row, "enter")
 			if view := app.View(); !strings.Contains(view, "╰") {
-				t.Errorf("%dx%d, row %s: the confirmation is clamped before its end:\n%s", size[0], size[1], row, view)
+				t.Errorf("%dx%d, row %s: the rejection is clamped before its end:\n%s", size[0], size[1], row, view)
 			}
 			press("n") // back to the list
 		}
-
-		press("3", "enter", "y") // ml-staging, through provision
-		st := app.deps.Setup
-		for n := 1; n <= len(pools); n++ {
-			for _, unsure := range []bool{false, true} {
-				st.ReplacePools = gcp.PoolReplacement{Needed: true, Names: pools[:n], Unsure: unsure}
-				view := app.View()
-				if strings.Count(view, "--location 'us-central1'") < 2 {
-					t.Errorf("%dx%d, %d pools, unsure=%v: the commands are clamped:\n%s", size[0], size[1], n, unsure, view)
-				}
-				for _, p := range pools[:n] {
-					if !strings.Contains(view, p) {
-						t.Errorf("%dx%d, %d pools: %q is split or missing:\n%s", size[0], size[1], n, p, view)
-					}
-				}
-			}
-		}
-	}
-}
-
-// The advisory wording is what keeps a re-run from losing the replacement:
-// after an earlier run turned the APIs on, ml-staging badges ready and goes
-// straight through, and nothing else would tell the user its old pools still
-// need replacing before Substrate's pods land on them.
-func TestARerunStillTellsTheUserToCheckOldPools(t *testing.T) {
-	s, drive, _ := drivenClusterScreen(t)
-	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
-		Name: "ml-staging", Location: "us-central1", Status: "RUNNING", MasterVersion: "1.36.4-gke.1247000", NodeCount: 6,
-		BetaAPIs:     gcp.RequiredBetaAPIs, // turned on by the earlier run
-		PoolVersions: []gcp.PoolVersion{{Name: "default-pool", Version: "1.36.4-gke.1247000"}},
-	}}})
-	s.cursor = 0
-	drive(key("enter"))
-	r := s.deps.Setup.ReplacePools
-	if s.deps.Setup.ClusterName != "ml-staging" || !r.Needed || !r.Unsure || !slices.Equal(r.Names, []string{"default-pool"}) {
-		t.Fatalf("re-run: cluster=%q pools=%+v, want ml-staging chosen with default-pool to check", s.deps.Setup.ClusterName, r)
 	}
 }
 
@@ -2226,27 +2172,6 @@ func TestProvisionSaysWhenTheBetaAPIsAreNotNeeded(t *testing.T) {
 	press("4", "enter") // substrate-ga: 1.37 throughout, no beta APIs
 	if view := flat(app.cur.View(120)); !strings.Contains(view, "needs no beta APIs, but bootstrap turns them on for every cluster") {
 		t.Errorf("provision should say the update is not needed for this cluster:\n%s", view)
-	}
-}
-
-// An unreadable control-plane version over pools that are all on 1.37 is not
-// ready — the control plane might not serve v1 — but there is no pool to
-// replace, and none is recorded. The confirmation must not promise that
-// provision will list some.
-func TestAnUnreadableControlPlaneOverGoodPoolsPromisesNoReplacement(t *testing.T) {
-	s, drive, _ := drivenClusterScreen(t)
-	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
-		Name: "odd", Location: "us-west1-c", Status: "RUNNING", MasterVersion: "???", NodeCount: 2,
-		PoolVersions: []gcp.PoolVersion{{Name: "a", Version: "1.37.1-gke.1000000"}},
-	}}})
-	s.cursor = 0
-	drive(key("enter"))
-	if s.mode != "confirm" {
-		t.Fatalf("mode = %q, want the confirmation", s.mode)
-	}
-	view := flat(s.View(120))
-	if strings.Contains(view, "must be replaced") || !strings.Contains(view, "need nothing") {
-		t.Errorf("the confirmation should say the pools are fine:\n%s", view)
 	}
 }
 
@@ -2293,7 +2218,7 @@ func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	// 5:Subnetwork, 6:ClusterVersion, 7:ReleaseChannel
 	press("enter", "enter", "enter", "enter", "enter", "enter")
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.36")
+	typed("1.37.0")
 	press("enter") // to the channel field
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
 	typed("regular")
@@ -2302,8 +2227,8 @@ func TestAdvancedTrackOffersTheClusterVersionAndChannel(t *testing.T) {
 	if app.mach.Current() != state.Cluster {
 		t.Fatalf("after project: %v", app.mach.Current())
 	}
-	if st.ClusterVersion != "1.36" || st.ReleaseChannel != "regular" {
-		t.Errorf("edited: version=%q channel=%q, want 1.36 on regular", st.ClusterVersion, st.ReleaseChannel)
+	if st.ClusterVersion != "1.37.0" || st.ReleaseChannel != "regular" {
+		t.Errorf("edited: version=%q channel=%q, want 1.37.0 on regular", st.ClusterVersion, st.ReleaseChannel)
 	}
 }
 
@@ -2337,10 +2262,10 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 	press("enter", "enter", "enter", "enter", "enter", "enter") // to the version field
 
 	pump(t, app, tea.KeyMsg{Type: tea.KeyCtrlU})
-	typed("1.35")
+	typed("1.36")
 	press("enter", "enter") // past the channel field, then submit
 	if app.mach.Current() != state.Project {
-		t.Fatalf("1.35 was accepted: step=%v, want to stay on the project screen", app.mach.Current())
+		t.Fatalf("1.36 was accepted: step=%v, want to stay on the project screen", app.mach.Current())
 	}
 	if view := app.View(); !strings.Contains(view, "below "+gcp.MinSupportedRelease.String()) {
 		t.Errorf("the refusal should name the floor:\n%s", view)
@@ -2364,9 +2289,9 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 	app.deps.Setup.ClusterVersion = "1.38"
 	press := pressToCluster(t, app)
 
-	press("3", "enter") // ml-staging: 1.36, no beta APIs
+	press("3", "enter") // ml-staging: 1.36 pools
 	view := flat(app.View())
-	if !strings.Contains(view, "made at 1.38 with the APIs on") {
+	if !strings.Contains(view, "made at 1.38.") {
 		t.Errorf("the confirmation should quote the chosen version 1.38:\n%s", view)
 	}
 	if strings.Contains(view, "made at "+state.DefaultClusterVersion) {
@@ -2374,13 +2299,10 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 	}
 }
 
-// After 'y' on a cluster without the beta APIs, provision is about to run a
-// control-plane update of about ten minutes — the confirmation just said so.
-// A provision screen that then promises to "only fill in the bucket" and a
-// checklist that says it is creating the cluster leave the user thinking the
-// install has hung. Where the pools predate the APIs, provision is also where
-// the user learns which to replace: after it, Substrate's own control plane
-// is scheduled, and it mounts pod certificates.
+// On a cluster without the beta APIs, provision is about to run a
+// control-plane update of about ten minutes. A provision screen that promises
+// to "only fill in the bucket" and a checklist that says it is creating the
+// cluster leave the user thinking the install has hung.
 func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	app := testApp(t)
 	press := pressToCluster(t, app)
@@ -2395,29 +2317,8 @@ func TestProvisionSaysWhenItTurnsOnTheBetaAPIs(t *testing.T) {
 	if !strings.Contains(view, "Turn on the beta PodCertificate APIs (control-plane update)") {
 		t.Errorf("provision's checklist should name the beta-API update:\n%s", view)
 	}
-	if strings.Contains(view, "only fills in the bucket") || strings.Contains(view, "pools before Substrate starts") {
-		t.Errorf("provision on 1.37 pools: wrong header or a replacement nobody needs:\n%s", view)
-	}
-
-	// A cluster that does need them gets the header that says so. Rendered
-	// directly: driven through provision, a cluster with old pools ends on
-	// the replacement block, which takes the header's place.
-	needs := &Deps{Setup: state.NewSetup(), Runner: execx.DryRun{Delay: time.Millisecond},
-		GCP: &gcp.Client{DryRun: true}, Builder: snapshot.NewBuilder(t.TempDir(), false)}
-	needs.Setup.ClusterName, needs.Setup.EnableBetaAPIs = "ml-staging", true
-	if view := flat(newProvisionScreen(needs).View(120)); !strings.Contains(view, "Turning on the beta PodCertificate APIs for ml-staging") {
-		t.Errorf("provision should say it is turning the APIs on for a cluster that needs them:\n%s", view)
-	}
-
-	old := testApp(t)
-	press = pressToCluster(t, old)
-	press("3", "enter", "y") // ml-staging: 1.36 pools
-	if got := strings.Join(old.deps.Setup.ReplacePools.Names, ","); got != "default-pool,gpu-pool" {
-		t.Errorf("pools to replace = %q, want default-pool,gpu-pool", got)
-	}
-	if view := flat(old.View()); !strings.Contains(view, "Replace these pools before Substrate starts") ||
-		!strings.Contains(view, "pools replaced, turn on Substrate") {
-		t.Errorf("provision on 1.36 pools should end on the replacement, not 'turn on Substrate':\n%s", view)
+	if strings.Contains(view, "only fills in the bucket") {
+		t.Errorf("provision on a cluster without the beta APIs: wrong header:\n%s", view)
 	}
 
 	ready := testApp(t)
@@ -2456,7 +2357,7 @@ func TestAReloadDuringTheConfirmationKeepsTheSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	drive(clustersMsg{owner: s, clusters: clusters})
-	s.cursor = 2 // ml-staging: 1.36, no beta APIs
+	s.cursor = 2 // ml-staging: 1.36 pools
 	drive(key("enter"))
 	if s.mode != "confirm" {
 		t.Fatalf("mode = %q, want confirm", s.mode)
@@ -2504,11 +2405,9 @@ func drivenClusterScreen(t *testing.T) (*clusterScreen, func(tea.Msg), []gcp.Clu
 	return s, drive, clusters
 }
 
-// A reload that lands mid-confirmation after the APIs were turned on out of
-// band must not leave the panel saying they are missing: 'y' through it
-// would record nothing to enable, and provision would then contradict the
-// screen the user just read.
-func TestAReloadAfterTheAPIsWereTurnedOnLeavesTheConfirmation(t *testing.T) {
+// A reload that lands mid-rejection after the pools were upgraded out of band
+// must not leave the panel saying they are below the floor.
+func TestAReloadAfterAnUpgradeLeavesTheRejection(t *testing.T) {
 	s, drive, clusters := drivenClusterScreen(t)
 	s.cursor = 2 // ml-staging
 	drive(key("enter"))
@@ -2516,7 +2415,7 @@ func TestAReloadAfterTheAPIsWereTurnedOnLeavesTheConfirmation(t *testing.T) {
 		t.Fatalf("mode = %q, want confirm", s.mode)
 	}
 	fixed := slices.Clone(clusters)
-	fixed[2].BetaAPIs = gcp.RequiredBetaAPIs
+	fixed[2].PoolVersions = []gcp.PoolVersion{{Name: "default-pool", Version: "1.37.1-gke.1000000"}}
 	drive(clustersMsg{owner: s, clusters: fixed})
 	if s.mode != "list" || s.clusters[s.cursor].Name != "ml-staging" {
 		t.Errorf("mode=%q cursor=%d, want the list with ml-staging still selected", s.mode, s.cursor)
@@ -2546,58 +2445,36 @@ func TestAReloadDoesNotDisturbWorkInProgress(t *testing.T) {
 }
 
 // A 1.37 control plane does not make 1.36 pools safe: their kubelets serve
-// pod certificate projection only behind the beta gate. Such a cluster without
-// the beta APIs has to stop at the confirmation and name the old pool; waving
-// it through on the control plane's version alone hangs Substrate's pods on
-// those nodes.
-func TestA137ControlPlaneWithOldPoolsStillNeedsTheRepair(t *testing.T) {
-	s, drive, _ := drivenClusterScreen(t)
-	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
-		Name: "mixed", Location: "us-west1-c", Status: "RUNNING", MasterVersion: "1.37.1-gke.1000000", NodeCount: 3,
-		PoolVersions: []gcp.PoolVersion{{Name: "old-pool", Version: "1.36.4-gke.1247000"}, {Name: "new-pool", Version: "1.37.1-gke.1000000"}},
-	}}})
-	s.cursor = 0
-	drive(key("enter"))
-	if s.mode != "confirm" {
-		t.Fatalf("mode = %q, want the confirmation", s.mode)
-	}
-	if view := flat(s.View(120)); !strings.Contains(view, "1 node pool runs below") {
-		t.Errorf("the confirmation should name one old pool:\n%s", view)
-	}
-	drive(key("y"))
-	if got := strings.Join(s.deps.Setup.ReplacePools.Names, ","); got != "old-pool" {
-		t.Errorf("pools to replace = %q, want old-pool", got)
-	}
-}
-
-// A cluster below the floor that already serves both APIs is not ready, but
-// bootstrap has nothing to enable on it. Recording an enablement would have
-// provision announce a ten-minute update while setup-gcp logs that the APIs
-// "match perfectly" and does nothing.
-func TestABelowTheFloorClusterWithTheAPIsRecordsNothingToEnable(t *testing.T) {
-	s, drive, _ := drivenClusterScreen(t)
-	drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
-		Name: "old-with-apis", Location: "us-west1-c", Status: "RUNNING",
-		MasterVersion: "1.35.5-gke.1163012", NodeCount: 1, BetaAPIs: gcp.RequiredBetaAPIs,
-	}}})
-	s.cursor = 0
-	drive(key("enter"))
-	if s.mode != "confirm" {
-		t.Fatalf("mode = %q, want the below-the-floor confirmation", s.mode)
-	}
-	drive(key("y"))
-	// Nothing to enable. The pools are still worth checking, but only as
-	// advice: the APIs were on already, so whether its nodes predate them is
-	// not something the listing can say.
-	if st := s.deps.Setup; st.ClusterName != "old-with-apis" || st.EnableBetaAPIs || (st.ReplacePools.Needed && !st.ReplacePools.Unsure) {
-		t.Errorf("chose %q with EnableBetaAPIs=%v pools=%+v, want nothing to enable and any pool advice unsure",
-			st.ClusterName, st.EnableBetaAPIs, st.ReplacePools)
+// pod certificate projection only behind the beta gate. Such a cluster is
+// rejected, with or without the beta APIs, and the panel names the old pool;
+// waving it through on the control plane's version alone hangs Substrate's
+// pods on those nodes.
+func TestA137ControlPlaneWithOldPoolsIsRejected(t *testing.T) {
+	for _, apis := range [][]string{nil, gcp.RequiredBetaAPIs} {
+		s, drive, _ := drivenClusterScreen(t)
+		drive(clustersMsg{owner: s, clusters: []gcp.Cluster{{
+			Name: "mixed", Location: "us-west1-c", Status: "RUNNING", MasterVersion: "1.37.1-gke.1000000", NodeCount: 3,
+			BetaAPIs:     apis,
+			PoolVersions: []gcp.PoolVersion{{Name: "old-pool", Version: "1.36.4-gke.1247000"}, {Name: "new-pool", Version: "1.37.1-gke.1000000"}},
+		}}})
+		s.cursor = 0
+		drive(key("enter"))
+		if s.mode != "confirm" {
+			t.Fatalf("beta APIs %v: mode = %q, want the rejection", apis, s.mode)
+		}
+		if view := flat(s.View(120)); !strings.Contains(view, "1 node pool runs below "+gcp.MinSupportedRelease.String()+": old-pool.") {
+			t.Errorf("beta APIs %v: the rejection should name the one old pool:\n%s", apis, view)
+		}
+		drive(key("y"))
+		if s.mode != "list" || s.deps.Setup.ClusterName == "mixed" {
+			t.Errorf("beta APIs %v: after 'y' mode=%q cluster=%q, want the list and mixed not chosen", apis, s.mode, s.deps.Setup.ClusterName)
+		}
 	}
 }
 
 // The version and channel have to go together, or GKE refuses the create:
 // a channel only offers the versions it carries, and today 1.37 is in Rapid
-// alone. The installer asks GKE which channel carries what (canned under
+// and Regular but not Stable. The installer asks GKE which channel carries what (canned under
 // --dry-run) and says so on the project screen, pointing at a channel that
 // works. It is a warning, not a wall: submitting the same pair again goes on,
 // because the pair only matters if the next step creates a cluster, and GKE
@@ -2644,12 +2521,12 @@ func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 		t.Errorf("extended should be refused with its reason, got %q", scr.errText)
 	}
 
-	set(releaseChannelLabel, "regular")
+	set(releaseChannelLabel, "stable")
 	if submit() {
-		t.Fatal("1.37 on regular went through without a word")
+		t.Fatal("1.37 on stable went through without a word")
 	}
-	if !strings.Contains(scr.errText, "regular channel does not offer version 1.37") || !strings.Contains(scr.errText, "rapid does") {
-		t.Errorf("the warning should say regular lacks 1.37 and rapid has it, got %q", scr.errText)
+	if !strings.Contains(scr.errText, "stable channel does not offer version 1.37") || !strings.Contains(scr.errText, "rapid and regular do") {
+		t.Errorf("the warning should say stable lacks 1.37 and rapid and regular have it, got %q", scr.errText)
 	}
 
 	// An edit anywhere re-arms the warning: the check is per location, so
@@ -2658,11 +2535,11 @@ func TestTheChannelHasToOfferTheVersion(t *testing.T) {
 	scr.setFocus(1) // the zone
 	scr.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	set("Cluster location (zone)", "us-central1-a")
-	if submit() || !strings.Contains(scr.errText, "regular channel does not offer version 1.37 in us-central1-a") {
+	if submit() || !strings.Contains(scr.errText, "stable channel does not offer version 1.37 in us-central1-a") {
 		t.Fatalf("after editing the zone the warning should come back, got %q", scr.errText)
 	}
 
-	if !submit() || deps.Setup.ReleaseChannel != "regular" {
+	if !submit() || deps.Setup.ReleaseChannel != "stable" {
 		t.Errorf("a second submit of the same pair should go on: channel=%q err=%q", deps.Setup.ReleaseChannel, scr.errText)
 	}
 }
