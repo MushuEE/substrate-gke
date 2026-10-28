@@ -206,9 +206,16 @@ func nodeSysctlsConfigured(cluster *containerpb.Cluster) bool {
 // unimplemented".
 const minSupportedMinor = 37
 
-// validateClusterVersion rejects a requested version below minSupportedMinor.
-// An empty or unparseable value is left for GKE to judge.
+// validateClusterVersion rejects a requested version below minSupportedMinor
+// and fills in 1.<minSupportedMinor> when none was requested: left empty, GKE
+// would use the channel's default version, which can be below the floor
+// (Regular's is). An unparseable value is left for GKE to judge.
 func validateClusterVersion(cfg *Config) error {
+	if cfg.ClusterVersion == "" {
+		cfg.ClusterVersion = fmt.Sprintf("1.%d", minSupportedMinor)
+		slog.Info("No cluster version given; using the oldest release Agent Substrate supports", slog.String("version", cfg.ClusterVersion))
+		return nil
+	}
 	if minor, ok := kubernetesMinor(cfg.ClusterVersion); ok && minor < minSupportedMinor {
 		return fmt.Errorf("cluster version %q is below 1.%d, the oldest release Agent Substrate supports", cfg.ClusterVersion, minSupportedMinor)
 	}

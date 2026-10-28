@@ -47,10 +47,10 @@ You need two checkouts:
    default) keeps atelet's snapshot bucket roles, which Substrate releases up
    to v0.5.0 need; turn it off for later releases.
 
-   If you bring your own cluster, it needs the PodCertificateRequest and
-   ClusterTrustBundle APIs, which GKE 1.37 and later serve by default. On 1.36,
-   enable them as beta APIs, then replace any 1.36 node pools created before
-   that. See the [Create Cluster warning](../tools/setup-gcp/README.md#2-create-cluster).
+   If you bring your own cluster, its control plane and every node pool must
+   run GKE 1.37 or later, which serves the PodCertificateRequest and
+   ClusterTrustBundle APIs by default. `bootstrap` stops on a cluster with
+   either below 1.37. See the [Create Cluster warning](../tools/setup-gcp/README.md#2-create-cluster).
 
 4. From the Substrate checkout, deploy the control plane:
 

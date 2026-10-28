@@ -93,9 +93,9 @@ they differ; the tool never deletes or recreates an existing cluster.
 > GKE 1.37 is the minimum supported version, for the control plane and for
 > every node pool. For an existing cluster, `create cluster` and `bootstrap`
 > stop before changing anything if the control plane or any node pool runs
-> below 1.37, and log the upgrade command for each pool. A `--cluster-version`
-> below 1.37 is rejected. Leaving it empty takes the channel's default
-> version, which can be below 1.37 (Regular's is today), so set it.
+> below 1.37, and log the upgrade command for each pool. A new cluster is
+> created at 1.37 unless `--cluster-version` asks for a newer one; a version
+> below 1.37 is rejected.
 
 Which versions you can ask for depends on the release channel, so
 `--cluster-version` often needs `--release-channel` beside it. A channel only
@@ -146,7 +146,7 @@ go -C tools/setup-gcp run . create cluster [flags]
 | :--- | :--- | :--- | :--- |
 | `--name` | Name of the GKE cluster. | `CLUSTER_NAME` | `substrate-poc` |
 | `--location` | Zone or region for the cluster (must be compatible with `--region`). | `CLUSTER_LOCATION` | `us-west1-c` |
-| `--version` | Kubernetes version. | `CLUSTER_VERSION` | None |
+| `--version` | Kubernetes version for a new cluster; below 1.37 is rejected. | `CLUSTER_VERSION` | `1.37` |
 | `--release-channel` | Release channel for the new cluster: `rapid`, `regular`, `stable`, or `none` to unenroll. Empty leaves the cluster on GKE's default channel. | `RELEASE_CHANNEL` | None |
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |
@@ -418,7 +418,7 @@ go -C tools/setup-gcp run . bootstrap [flags]
 | :--- | :--- | :--- | :--- |
 | `--cluster-name` | Name of the GKE cluster. | `CLUSTER_NAME` | `substrate-poc` |
 | `--cluster-location`| Zone or region for the cluster (must be compatible with `--region`). | `CLUSTER_LOCATION` | `us-west1-c` |
-| `--cluster-version` | Kubernetes version. | `CLUSTER_VERSION` | None |
+| `--cluster-version` | Kubernetes version for a new cluster; below 1.37 is rejected. | `CLUSTER_VERSION` | `1.37` |
 | `--release-channel` | Release channel for the new cluster: `rapid`, `regular`, `stable`, or `none` to unenroll. Empty leaves the cluster on GKE's default channel. | `RELEASE_CHANNEL` | None |
 | `--network` | VPC network name. | `NETWORK` | `default` |
 | `--subnetwork` | VPC subnetwork name. | `SUBNETWORK` | `default` |

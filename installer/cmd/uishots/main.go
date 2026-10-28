@@ -96,7 +96,7 @@ func main() {
 	shot(out, "clusters", app)            // list with install-state badges
 
 	press(app, "5", "enter") // the installed fixture → blocked panel
-	resize(app, 42)
+	resize(app, 43)
 	shot(out, "guard", app)
 	resize(app, 26)
 

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -2119,7 +2120,7 @@ func TestRejectionNamesWhatToUpgrade(t *testing.T) {
 	}
 	floor := gcp.MinSupportedRelease.String()
 	view := flat(scr.View(120))
-	if !strings.Contains(view, "2 node pools run below "+floor+": default-pool, gpu-pool.") || !strings.Contains(view, "Upgrade them to "+floor) {
+	if !strings.Contains(view, "2 node pools run below "+floor+": default-pool, gpu-pool") || !strings.Contains(view, "Upgrade them to "+floor) {
 		t.Errorf("the rejection should name the old pools and ask for their upgrade:\n%s", view)
 	}
 	// 'y' used to choose the cluster anyway. Bootstrap refuses a cluster
@@ -2146,8 +2147,14 @@ func TestRejectionNamesWhatToUpgrade(t *testing.T) {
 // The rejection panel has to be readable in a small terminal, beside the
 // sidebar: at 80×24 an earlier version was clamped after its first lines,
 // hiding the remedy. Its bottom border is what gets cut first, so that is
-// what is checked.
+// what is checked — also for a cluster with many old pools, whose list once
+// broke names at their hyphens and clamped the panel from about 8 pools.
 func TestRejectionPanelFitsSmallTerminals(t *testing.T) {
+	var many []gcp.PoolVersion
+	for i := range 20 {
+		many = append(many, gcp.PoolVersion{Name: fmt.Sprintf("pool-%02d-workers", i), Version: "1.36.4-gke.1247000"})
+	}
+	hyphenBreak := regexp.MustCompile(`-\s*│`)
 	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
 		app := testApp(t)
 		press := pressToCluster(t, app)
@@ -2159,6 +2166,20 @@ func TestRejectionPanelFitsSmallTerminals(t *testing.T) {
 			}
 			press("n") // back to the list
 		}
+
+		app.cur.(*clusterScreen).clusters[2].PoolVersions = many // ml-staging
+		press("3", "enter")
+		view := app.View()
+		if !strings.Contains(view, "╰") || !strings.Contains(flat(view), "Upgrade them to "+gcp.MinSupportedRelease.String()) {
+			t.Errorf("%dx%d, 20 pools: the rejection is clamped before its remedy:\n%s", size[0], size[1], view)
+		}
+		if !strings.Contains(view, "pool-00-workers") || !strings.Contains(flat(view), "more") {
+			t.Errorf("%dx%d, 20 pools: want the first names listed whole and the rest counted:\n%s", size[0], size[1], view)
+		}
+		if hyphenBreak.MatchString(view) {
+			t.Errorf("%dx%d, 20 pools: a pool name is broken at a hyphen:\n%s", size[0], size[1], view)
+		}
+		press("n")
 	}
 }
 
@@ -2282,9 +2303,10 @@ func TestClusterVersionFieldRefusesAnUnsupportedRelease(t *testing.T) {
 }
 
 // The advanced track lets the user pick the release a new cluster comes up at,
-// so the cluster screen's advice must quote that choice. Someone who asked for
-// 1.38 and is told new clusters come at 1.36 has reason to doubt the rest.
-func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
+// so the rejection panel's alternative must quote that choice. Someone who
+// asked for 1.38 and is told new clusters come at the default 1.37 has reason
+// to doubt the rest.
+func TestRejectionQuotesTheChosenClusterVersion(t *testing.T) {
 	app := testApp(t)
 	app.deps.Setup.ClusterVersion = "1.38"
 	press := pressToCluster(t, app)
@@ -2292,10 +2314,10 @@ func TestConfirmationQuotesTheChosenClusterVersion(t *testing.T) {
 	press("3", "enter") // ml-staging: 1.36 pools
 	view := flat(app.View())
 	if !strings.Contains(view, "made at 1.38.") {
-		t.Errorf("the confirmation should quote the chosen version 1.38:\n%s", view)
+		t.Errorf("the rejection should quote the chosen version 1.38:\n%s", view)
 	}
 	if strings.Contains(view, "made at "+state.DefaultClusterVersion) {
-		t.Errorf("the confirmation quotes the default rather than the chosen version:\n%s", view)
+		t.Errorf("the rejection quotes the default rather than the chosen version:\n%s", view)
 	}
 }
 
@@ -2462,7 +2484,7 @@ func TestA137ControlPlaneWithOldPoolsIsRejected(t *testing.T) {
 		if s.mode != "confirm" {
 			t.Fatalf("beta APIs %v: mode = %q, want the rejection", apis, s.mode)
 		}
-		if view := flat(s.View(120)); !strings.Contains(view, "1 node pool runs below "+gcp.MinSupportedRelease.String()+": old-pool.") {
+		if view := flat(s.View(120)); !strings.Contains(view, "1 node pool runs below "+gcp.MinSupportedRelease.String()+": old-pool") {
 			t.Errorf("beta APIs %v: the rejection should name the one old pool:\n%s", apis, view)
 		}
 		drive(key("y"))
@@ -3494,5 +3516,50 @@ func TestImagesScreenOffersNoRegistryAndThePin(t *testing.T) {
 	pump(t, app, key("enter")) // build from source
 	if got := scr.value(0); got != snapshot.Commit {
 		t.Errorf("source revision = %q, want the pin %s", got, snapshot.Commit)
+	}
+}
+
+// The guard panel's cleanup command is meant to be copied. Word wrapping broke
+// quoted values at their hyphens and indented the continuation, so the copied
+// command no longer ran; it is broken at flags instead, with continuations.
+func TestShellLinesKeepTheCommandRunnable(t *testing.T) {
+	command := snapshot.CleanupCommand("my-substrate-project", "substrate-installed-cluster", "us-west1-c", "")
+	for _, width := range []int{36, 50, 80, 200} {
+		lines := shellLines(command, width)
+		for _, line := range lines {
+			// A single flag wider than the panel is allowed its own line.
+			if lipgloss.Width(line) > width && strings.Count(line, "--") > 1 {
+				t.Errorf("width %d: line %q is wider than the panel", width, line)
+			}
+			if strings.Count(line, "'")%2 != 0 {
+				t.Errorf("width %d: line %q breaks inside a quoted value", width, line)
+			}
+		}
+		joined := strings.Join(lines, "\n")
+		if got := strings.Join(strings.Fields(strings.ReplaceAll(joined, " \\\n", " ")), " "); got != command {
+			t.Errorf("width %d: rejoined command = %q, want %q", width, got, command)
+		}
+	}
+}
+
+// At 80 columns the reinstall guard's keys overflowed the hint bar even with
+// the tight separator, and the terminal cut off the last ones. The bar has to
+// fit and keep the screen's own keys and the way out.
+func TestHintBarFitsTheGuardAt80Columns(t *testing.T) {
+	app := testApp(t)
+	press := pressToCluster(t, app)
+	pump(t, app, tea.WindowSizeMsg{Width: 80, Height: 24})
+	press("5", "enter") // substrate-installed: the reinstall guard
+	lines := strings.Split(app.View(), "\n")
+	bar := lines[len(lines)-1]
+	// Every line of the view counts: lines are padded to the widest, so one
+	// that overflows (the subtitle once did) widens the bar too.
+	if w := lipgloss.Width(bar); w > 80 {
+		t.Errorf("hint bar is %d wide at 80 columns: %q", w, bar)
+	}
+	for _, k := range []string{"[t]", "[r]", "[esc]", "[ctrl+c]"} {
+		if !strings.Contains(bar, k) {
+			t.Errorf("hint bar lost %s: %q", k, bar)
+		}
 	}
 }

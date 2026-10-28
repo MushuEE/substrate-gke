@@ -821,23 +821,30 @@ func TestBuildCreateClusterRequest_ReleaseChannel(t *testing.T) {
 	}
 }
 
+// An empty version would let GKE pick the channel's default, which can be
+// below 1.37, so it becomes 1.37; anything else is kept as given.
 func TestValidateClusterVersion(t *testing.T) {
 	for _, tt := range []struct {
 		version string
+		want    string
 		wantErr bool
 	}{
-		{version: ""},
-		{version: "latest"},
-		{version: "1.37"},
-		{version: "1.37.1-gke.1000000"},
-		{version: "1.38"},
+		{version: "", want: "1.37"},
+		{version: "latest", want: "latest"},
+		{version: "1.37", want: "1.37"},
+		{version: "1.37.1-gke.1000000", want: "1.37.1-gke.1000000"},
+		{version: "1.38", want: "1.38"},
 		{version: "1.36", wantErr: true},
 		{version: "1.35.8-gke.1225000", wantErr: true},
 	} {
 		t.Run(tt.version, func(t *testing.T) {
-			err := validateClusterVersion(&Config{ClusterVersion: tt.version})
+			cfg := &Config{ClusterVersion: tt.version}
+			err := validateClusterVersion(cfg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateClusterVersion(%q) = %v, wantErr %v", tt.version, err, tt.wantErr)
+			}
+			if !tt.wantErr && cfg.ClusterVersion != tt.want {
+				t.Errorf("validateClusterVersion(%q) left version %q, want %q", tt.version, cfg.ClusterVersion, tt.want)
 			}
 		})
 	}
