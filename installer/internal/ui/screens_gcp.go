@@ -1631,22 +1631,29 @@ func (s *clusterScreen) View(w int) string {
 		if s.installedVersion != "" {
 			verStr = fmt.Sprintf(" (version: %s)", s.installedVersion)
 		}
-		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 88)).Render(
-			theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))+"\n\n"+
-				"Re-running the install track against an installed cluster is unsupported\n"+
-				"and leaves a mixed-version cluster, out of the upgrade order:\n"+
-				"  • The control plane and atelet roll to the new commit at once.\n"+
-				"  • Worker pools stay on the older worker image.\n\n"+
-				theme.Title.Render("Supported paths forward:")+"\n"+
-				"  1. Upgrade this cluster: exit or restart the installer and choose\n"+
-				"     \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.\n\n"+
-				"  2. Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete the Substrate control\n"+
-				"     plane on this cluster now (the cluster and its snapshots are kept)\n"+
-				"     and continue the install here. For the full GCP cleanup — cluster,\n"+
-				"     bucket, IAM, dashboards — run instead:\n"+
-				"     "+snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, "")+"\n"+
-				"     (--bucket: the snapshot bucket that install used)\n\n"+
-				theme.Key.Render("[t]")+" tear down here   "+theme.Key.Render("[esc]")+" choose another   "+theme.Key.Render("[r]")+" re-probe"))
+		// Wrapped here, to the panel's text width (its width less the
+		// padding), rather than broken by hand: hand-broken lines wider than
+		// the panel were re-wrapped by it into ragged half-lines, and list
+		// items lost their indent.
+		panelW := min(w-4, 88)
+		textW := panelW - 2
+		para := lipgloss.NewStyle().Width(textW)
+		b.WriteString("\n" + theme.ErrorPanel.Width(panelW).Render(strings.Join([]string{
+			para.Render(theme.Bad.Render(fmt.Sprintf("Cluster %q already runs Substrate%s.", sel.Name, verStr))),
+			"",
+			para.Render("Re-running the install track against an installed cluster is unsupported and leaves a mixed-version cluster, out of the upgrade order:"),
+			hangingIndent("  • ", "The control plane and atelet roll to the new commit at once.", textW),
+			hangingIndent("  • ", "Worker pools stay on the older worker image.", textW),
+			"",
+			theme.Title.Render("Supported paths forward:"),
+			hangingIndent("  1. ", "Upgrade this cluster: exit or restart the installer and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
+			"",
+			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete the Substrate control plane on this cluster now (the cluster and its snapshots are kept) and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
+			hangingIndent("     ", snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW),
+			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
+			"",
+			theme.Key.Render("[t]") + " tear down here   " + theme.Key.Render("[esc]") + " choose another   " + theme.Key.Render("[r]") + " re-probe",
+		}, "\n")))
 	case "teardown-confirm":
 		sel := s.clusters[s.cursor]
 		b.WriteString("\n" + theme.ErrorPanel.Width(min(w-4, 76)).Render(

@@ -94,10 +94,31 @@ func (a *App) sidebarView(w, h int) string {
 		case s == cur:
 			glyph, style = theme.GlyphActive, theme.Title
 		}
-		b.WriteString(fmt.Sprintf(" %s %s\n", style.Render(glyph), style.Render(fmt.Sprintf("%d. %s", n, s.Title()))))
+		// Some titles are wider than the rail. Wrapped by the Width below,
+		// their second line started at column 0, under the glyphs.
+		prefix := " " + style.Render(glyph) + " " + style.Render(fmt.Sprintf("%d.", n)) + " "
+		b.WriteString(hangingIndent(prefix, style.Render(s.Title()), w) + "\n")
 	}
 
 	return lipgloss.NewStyle().Width(w).Height(h).Render(b.String())
+}
+
+// hangingIndent wraps text to fit width after first, which prefixes the first
+// line; every later line is indented by first's width, so a wrapped list item
+// or step title stays aligned under its own text.
+func hangingIndent(first, text string, width int) string {
+	pad := lipgloss.Width(first)
+	wrapped := lipgloss.NewStyle().Width(max(width-pad, 1)).Render(text)
+	lines := strings.Split(wrapped, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, " ")
+		if i == 0 {
+			lines[i] = first + line
+		} else {
+			lines[i] = strings.Repeat(" ", pad) + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // bottomView is the persistent keymap bar (k9s-style, from the prototype).
@@ -131,6 +152,11 @@ func (a *App) bottomView() string {
 		parts = append(parts, theme.Key.Render("["+hint.Key+"]")+" "+theme.Subtle.Render(hint.Label))
 	}
 	line := " " + strings.Join(parts, theme.Fainted.Render("  ·  "))
+	// A screen with many keys overflows the terminal and loses the last ones
+	// at the edge; a tighter separator usually brings them back.
+	if lipgloss.Width(line) > a.width {
+		line = " " + strings.Join(parts, theme.Fainted.Render(" · "))
+	}
 	return theme.Fainted.Render(strings.Repeat("─", max(a.width, 1))) + "\n" + line
 }
 

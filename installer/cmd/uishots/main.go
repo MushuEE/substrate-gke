@@ -68,22 +68,37 @@ func main() {
 	// placeholder home directory, so the screenshot shows neither this
 	// machine's path nor an unexpandable '~' (ShellQuote single-quotes it).
 	deps.Builder.SetupGCP = "/home/you/.substrate-gke/tools/setup-gcp"
+	// Provision's checklist names the substrate checkout, which would
+	// otherwise be the random temporary directory above and change the
+	// screenshot on every run.
+	deps.Builder.Root = "/home/you/substrate"
 	app := ui.NewApp(deps)
 	pump(app, tea.WindowSizeMsg{Width: 110, Height: 26})
 	for _, m := range runCmd(app.Init()) {
 		pump(app, m)
 	}
 
+	// Each screen gets the frame height that shows it whole: the installer
+	// clamps a screen to the terminal, so a short frame cuts off its panels.
+	resize(app, 31)
 	shot(out, "welcome", app)
+	resize(app, 26)
 
-	press(app, "enter")                            // welcome → doctor
-	press(app, "enter")                            // doctor → images
-	press(app, "enter", "enter", "enter", "enter") // pre-built images, defaults
-	press(app, "enter", "enter", "enter")          // project fields
-	shot(out, "clusters", app)                     // list with install-state badges
+	press(app, "enter")      // welcome → doctor
+	press(app, "enter")      // doctor → images
+	press(app, "1", "enter") // pre-built images
+	// There is no default registry, so the images step needs one and a tag.
+	paste(app, "registry.example.com/substrate")
+	press(app, "enter")
+	paste(app, "v0.6.0")
+	press(app, "enter", "enter")
+	press(app, "enter", "enter", "enter") // project fields
+	shot(out, "clusters", app)            // list with install-state badges
 
 	press(app, "5", "enter") // the installed fixture → blocked panel
+	resize(app, 42)
 	shot(out, "guard", app)
+	resize(app, 26)
 
 	press(app, "esc")        // back to the list
 	press(app, "1", "enter") // the clean cluster → provision runs (dry)
@@ -96,10 +111,13 @@ func main() {
 	press(app, "enter")      // gVisor is the default choice → demo
 	press(app, "1", "enter") // deploy the counter demo
 	press(app, "enter")      // → complete
-	// The completion screen is the tallest — summary, verify hint, and the
-	// next-steps panel; a taller frame keeps the panel unclipped.
-	pump(app, tea.WindowSizeMsg{Width: 110, Height: 33})
+	resize(app, 36)
 	shot(out, "complete", app)
+}
+
+// resize sets the frame to the README's 110 columns and h rows.
+func resize(app *ui.App, h int) {
+	pump(app, tea.WindowSizeMsg{Width: 110, Height: h})
 }
 
 func shot(dir, name string, app *ui.App) {
@@ -114,6 +132,11 @@ func press(app *ui.App, keys ...string) {
 	for _, k := range keys {
 		pump(app, key(k))
 	}
+}
+
+// paste delivers text as one pasted message, as the UI tests' typeText does.
+func paste(app *ui.App, text string) {
+	pump(app, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(text), Paste: true})
 }
 
 func key(s string) tea.Msg {
