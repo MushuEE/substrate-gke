@@ -1904,7 +1904,8 @@ func TestClusterScreenBlocksAlreadyInstalledCluster(t *testing.T) {
 	if !strings.Contains(view, "already runs Substrate") || !strings.Contains(view, "substrate-71e7623") {
 		t.Errorf("view missing installed version warning:\n%s", view)
 	}
-	if !strings.Contains(view, "Upgrade an installed cluster") {
+	// The panel wraps its text to fit, so the phrase may span a line break.
+	if !strings.Contains(flat(view), "Upgrade an installed cluster") {
 		t.Errorf("view missing upgrade track recommendation:\n%s", view)
 	}
 	if !strings.Contains(view, "cleanup-gcp") {
