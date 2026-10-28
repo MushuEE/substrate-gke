@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -343,6 +345,141 @@ func TestResetTokenAdoptsAFetchInFlight(t *testing.T) {
 	}
 	if n := fetches.Load(); n != 1 {
 		t.Errorf("submit 2 spawned its own fetch: %d fetches, want 1", n)
+	}
+}
+
+// #57: a fetch begun by an earlier action and adopted after ResetToken
+// shares its success, but not its failure. The failure may be what the user
+// just fixed with `gcloud auth application-default login`, so this action's
+// caller fetches once more and gets the fix. A caller from the earlier
+// action still gets the error it was waiting for.
+func TestAdoptedFetchFailureIsRetriedAfterReset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"billingEnabled": true}`))
+	}))
+	defer srv.Close()
+	var fetches atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	joined := make(chan struct{}, 2)
+	c := &Client{billingBase: srv.URL,
+		token: func(context.Context) (string, error) {
+			if fetches.Add(1) == 1 {
+				close(started)
+				<-release
+				return "", errors.New("Reauthentication failed. cannot prompt during non-interactive execution.")
+			}
+			return "after-login", nil
+		},
+		onTokenWait: func() { joined <- struct{}{} },
+	}
+
+	// Action 1: its warm-up starts the fetch, and one of its probes joins.
+	go c.WarmToken(context.Background())
+	<-started
+	oldErr := make(chan error, 1)
+	go func() { _, err := c.accessToken(context.Background()); oldErr <- err }()
+	<-joined
+
+	// The user re-logs in, and action 2 starts while action 1's fetch is
+	// still running; its probe joins that fetch.
+	c.ResetToken()
+	newRes := make(chan error, 1)
+	go func() {
+		on, err := c.BillingEnabled(context.Background(), "acme")
+		if err == nil && !on {
+			err = errors.New("billing read as off")
+		}
+		newRes <- err
+	}()
+	<-joined
+	close(release) // the adopted fetch fails
+
+	if err := <-oldErr; err == nil || !strings.Contains(err.Error(), "Reauthentication failed") {
+		t.Errorf("action 1's caller should share its fetch's error, got %v", err)
+	}
+	if err := <-newRes; err != nil {
+		t.Errorf("action 2 should refetch past the adopted failure and succeed, got %v", err)
+	}
+	if n := fetches.Load(); n != 2 {
+		t.Errorf("fetches = %d, want 2 (the adopted one and action 2's own)", n)
+	}
+}
+
+// #57: Close cancels a token fetch still running (it derives from the
+// Client's lifetime, not any caller's context) and waits for it to exit,
+// so nothing outlives the installer. Work after Close fails at once.
+func TestCloseCancelsATokenFetch(t *testing.T) {
+	started, exited := make(chan struct{}), make(chan struct{})
+	c := &Client{token: func(ctx context.Context) (string, error) {
+		close(started)
+		<-ctx.Done()
+		close(exited)
+		return "", ctx.Err()
+	}}
+	res := make(chan error, 1)
+	go func() { _, err := c.accessToken(context.Background()); res <- err }()
+	<-started
+
+	start := time.Now()
+	c.Close()
+	if d := time.Since(start); d > closeWait/2 {
+		t.Errorf("Close took %v; a cancelled fetch should exit at once", d)
+	}
+	select {
+	case <-exited:
+	default:
+		t.Error("Close returned before the fetch exited")
+	}
+	if err := <-res; err == nil {
+		t.Error("the caller waiting on a cancelled fetch should get an error")
+	}
+	if _, err := c.accessToken(context.Background()); !errors.Is(err, errClosed) {
+		t.Errorf("accessToken after Close = %v, want errClosed", err)
+	}
+	c.Close() // safe to call again
+}
+
+// #57: Close kills a gcloud child still running rather than leaving it
+// orphaned when the installer exits. A fake gcloud on PATH marks that it
+// started, then sleeps.
+func TestCloseKillsGcloud(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "started")
+	script := "#!/bin/sh\ntouch '" + mark + "'\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "gcloud"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := &Client{}
+	res := make(chan error, 1)
+	go func() { _, err := c.ProjectNumber(context.Background(), "acme"); res <- err }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(mark); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake gcloud never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	start := time.Now()
+	c.Close()
+	select {
+	case err := <-res:
+		if err == nil {
+			t.Error("ProjectNumber should fail once its gcloud is killed")
+		}
+	case <-time.After(closeWait):
+		t.Fatal("ProjectNumber still running after Close: its gcloud was not killed")
+	}
+	if d := time.Since(start); d > closeWait {
+		t.Errorf("Close took %v", d)
+	}
+	if _, err := c.ProjectNumber(context.Background(), "acme"); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Errorf("ProjectNumber after Close = %v, want it to fail as closed", err)
 	}
 }
 
