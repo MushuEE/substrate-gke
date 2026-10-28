@@ -251,6 +251,74 @@ func clusterVersionProblem(v string) string {
 	return fmt.Sprintf("Cluster version %s is below %s, the oldest release Substrate is supported on.", v, gcp.MinSupportedRelease)
 }
 
+// maxPoolNameLines caps the node pool names the rejection panel lists. At
+// 80×24, beside the sidebar, more lines clamp the panel and cut off the
+// remedy below them.
+const maxPoolNameLines = 2
+
+// poolNameLines lays out names in at most maxLines lines no wider than width.
+// When they do not all fit, as many as do are listed, followed by "and N
+// more".
+func poolNameLines(names []string, width, maxLines int) []string {
+	if lines := wrapNames(names, width); len(lines) <= maxLines {
+		return lines
+	}
+	for shown := len(names) - 1; shown > 0; shown-- {
+		listed := append(append([]string{}, names[:shown]...), fmt.Sprintf("and %d more", len(names)-shown))
+		if lines := wrapNames(listed, width); len(lines) <= maxLines {
+			return lines
+		}
+	}
+	return []string{fmt.Sprintf("%d pools", len(names))}
+}
+
+// wrapNames joins names with ", " into lines no wider than width, breaking
+// only between names. A name wider than width gets a line of its own rather
+// than being split, which would make it look like two pools.
+func wrapNames(names []string, width int) []string {
+	var lines []string
+	line := ""
+	for i, n := range names {
+		item := n
+		if i < len(names)-1 {
+			item += ","
+		}
+		switch {
+		case line == "":
+			line = item
+		case lipgloss.Width(line)+1+lipgloss.Width(item) <= width:
+			line += " " + item
+		default:
+			lines = append(lines, line)
+			line = item
+		}
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// shellLines breaks a command into lines no wider than width at its " --"
+// flag boundaries, ending every line but the last with " \", so the lines can
+// be copied and run as they are. Word wrapping broke quoted values at their
+// hyphens instead. A flag wider than width gets a line of its own.
+func shellLines(command string, width int) []string {
+	parts := strings.Split(command, " --")
+	var lines []string
+	line := parts[0]
+	for _, p := range parts[1:] {
+		p = "--" + p
+		if lipgloss.Width(line)+1+lipgloss.Width(p)+2 <= width {
+			line += " " + p
+			continue
+		}
+		lines = append(lines, line+" \\")
+		line = "  " + p
+	}
+	return append(lines, line)
+}
+
 // Labels of the new-cluster fields, which submit reads back to ask GKE
 // whether the channel carries the version.
 const (
@@ -322,7 +390,11 @@ func channelProblem(ctx context.Context, gc *gcp.Client, project, location, vers
 	if len(with) == 0 {
 		return fmt.Sprintf("GKE has no channel that offers version %s in %s.", version, location), true
 	}
-	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s does.", channel, version, location, strings.Join(with, " and ")), false
+	verb := "does"
+	if len(with) > 1 {
+		verb = "do"
+	}
+	return fmt.Sprintf("The %s channel does not offer version %s in %s; %s %s.", channel, version, location, strings.Join(with, " and "), verb), false
 }
 
 // fieldValue returns the trimmed value of the field labeled label, or "" when
@@ -1099,14 +1171,7 @@ func (s *clusterScreen) Hints() []Hint {
 		}
 		return []Hint{{"esc", "cancel"}}
 	case "confirm":
-		// Below the floor 'y' leads somewhere nobody supports, and often to a
-		// bootstrap that asks GKE for an API that release has never had and
-		// stops there. Keep the key — a canned fixture or a misread version
-		// should not trap anyone — but stop advertising it as a way forward.
-		if s.cursor < len(s.clusters) && !s.clusters[s.cursor].SupportedRelease() {
-			return []Hint{{"y", "use it anyway (unsupported)"}, {"esc", "choose another"}}
-		}
-		return []Hint{{"y", "enable and continue"}, {"esc", "choose another"}}
+		return []Hint{{"esc", "choose another"}}
 	}
 	return []Hint{{"↑/↓", "select"}, {"enter", "confirm"}, {"r", "reload"}, {"b", "back"}}
 }
@@ -1147,7 +1212,7 @@ func (s *clusterScreen) probe(c gcp.Cluster) tea.Cmd {
 // decide routes a probe result: a running install is blocked, a bare
 // ate-system namespace (an interrupted install — upstream's deploy is
 // documented safe to re-run) asks, and a clean cluster continues through the
-// pre-existing beta-API check.
+// version check.
 func (s *clusterScreen) decide(c gcp.Cluster, res snapshot.InstalledProbe) tea.Cmd {
 	switch {
 	case res.Partial():
@@ -1248,10 +1313,9 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			case !kept:
 				s.mode = "list"
 			case s.mode == "confirm" && s.clusters[s.cursor].SubstrateReady():
-				// The APIs were turned on out of band between the reloads.
-				// The confirmation is about a problem the cluster no longer
-				// has, and 'y' through it would record nothing to enable.
-				// Back to the list, where the row now badges ready.
+				// The cluster was upgraded out of band between the reloads.
+				// The rejection is about a problem the cluster no longer
+				// has. Back to the list, where the row now badges ready.
 				s.mode = "list"
 			}
 			return s.bgProbes()
@@ -1381,9 +1445,8 @@ func (s *clusterScreen) Update(msg tea.Msg) tea.Cmd {
 			return nil
 
 		case "confirm":
-			if key == "y" {
-				return s.choose(s.clusters[s.cursor])
-			}
+			// A rejection, not a question: a cluster below the floor cannot be
+			// chosen, and bootstrap would refuse it.
 			s.mode = "list"
 			return nil
 		}
@@ -1542,7 +1605,8 @@ func truncateTo(s string, n int) string {
 func (s *clusterScreen) View(w int) string {
 	var b strings.Builder
 	b.WriteString(theme.Title.Render("Connect your cluster") + "\n")
-	b.WriteString(theme.Subtle.Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
+	// Wrapped to the content width: at 80 columns it ran past the edge.
+	b.WriteString(theme.Subtle.Width(max(w-2, 20)).Render(fmt.Sprintf("GKE clusters in %s (via `gcloud container clusters list`).", s.deps.Setup.ProjectID)) + "\n\n")
 
 	switch {
 	case s.loading:
@@ -1557,26 +1621,19 @@ func (s *clusterScreen) View(w int) string {
 	badges := make([]string, len(s.clusters))
 	shorts := make([]string, len(s.clusters))
 	for i, c := range s.clusters {
-		// "substrate-ready" is capability (the beta PodCertificate APIs), not
-		// install state: what the probe learned about an actual install is its
-		// own badge, so a teardown visibly clears it while readiness rightly
-		// stays. Name the missing capability rather than only saying something
-		// is — the confirm panel then explains how to get it.
+		// "substrate-ready" is capability (a supported release on the control
+		// plane and every node pool), not install state: what the probe
+		// learned about an actual install is its own badge, so a teardown
+		// visibly clears it while readiness rightly stays. The rejection panel
+		// says which part is below the floor.
 		//
 		// Each badge has a short form too, for terminals too narrow for the
 		// long one (see clusterRows).
 		badge := theme.Good.Render(theme.GlyphDone + " substrate-ready")
 		short := theme.Good.Render(theme.GlyphDone + " ready")
-		switch {
-		case c.SubstrateReady():
-		case !c.SupportedRelease():
-			// Distinct from "missing" because the remedy differs: no
-			// enablement helps this one until the control plane moves.
+		if !c.SubstrateReady() {
 			badge = theme.Bad.Render(theme.GlyphFail + " needs " + gcp.MinSupportedRelease.String() + "+")
 			short = badge
-		default:
-			badge = theme.Bad.Render(theme.GlyphFail + " beta APIs missing")
-			short = theme.Bad.Render(theme.GlyphFail + " no beta APIs")
 		}
 		if res, ok := s.probed[c.Name+"/"+c.Location]; ok && res.Installed {
 			label, shortLabel := " · substrate installed", " · installed"
@@ -1649,7 +1706,7 @@ func (s *clusterScreen) View(w int) string {
 			hangingIndent("  1. ", "Upgrade this cluster: exit or restart the installer and choose \"Upgrade an installed cluster\" to follow the rolling upgrade runbook.", textW),
 			"",
 			hangingIndent("  2. ", "Tear down and reinstall: press "+theme.Key.Render("[t]")+" to delete the Substrate control plane on this cluster now (the cluster and its snapshots are kept) and continue the install here. For the full GCP cleanup — cluster, bucket, IAM, dashboards — run instead:", textW),
-			hangingIndent("     ", snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW),
+			"     " + strings.Join(shellLines(snapshot.CleanupCommand(s.deps.Setup.ProjectID, sel.Name, sel.Location, ""), textW-5), "\n     "),
 			hangingIndent("     ", "(--bucket: the snapshot bucket that install used)", textW),
 			"",
 			theme.Key.Render("[t]") + " tear down here   " + theme.Key.Render("[esc]") + " choose another   " + theme.Key.Render("[r]") + " re-probe",
@@ -1676,73 +1733,49 @@ func (s *clusterScreen) View(w int) string {
 				theme.Key.Render("[y]")+" continue   "+theme.Key.Render("[r]")+" re-probe   "+theme.Key.Render("[esc]")+" choose another"))
 	case "confirm":
 		sel := s.clusters[s.cursor]
-		// Two outcomes, and the release picks which: below the floor nothing
-		// that can be enabled helps; above it provision turns the APIs on in
-		// place, and the pools below 1.37 that made them necessary have to be
-		// replaced afterward. (A cluster with no such pool serves the APIs as
-		// GA and never reaches this panel.)
+		// Two outcomes, and the control plane picks which. GKE upgrades node
+		// pools only up to the control plane's version, so a control plane
+		// below the floor has to move first.
 		//
 		// Written as paragraphs for the panel to wrap, with no token longer
 		// than the narrowest panel (about 40 columns at 80×24, beside the
-		// sidebar): hard-wrapped lines and full API names broke mid-word
-		// there, and the panel was taller than the window. The keys are not
-		// repeated here; the bottom bar always shows them, outside the clamp.
-		// The replacement commands are not here either — they are needed
-		// after provision, so that is where provision shows them.
-		version := s.deps.Setup.ClusterVersion
-		var title string
+		// sidebar): hard-wrapped lines broke mid-word there, and the panel was
+		// taller than the window. The keys are not repeated here; the bottom
+		// bar always shows them, outside the clamp.
+		floor := gcp.MinSupportedRelease.String()
+		panelW := min(w-4, 78)
+		title := sel.Name + " is below " + floor + ", the oldest release Substrate supports."
 		var paras []string
-		switch {
-		case !sel.SupportedRelease():
-			title = sel.Name + " is below " + gcp.MinSupportedRelease.String() + ", the oldest release Substrate supports."
-			lede := "Its control plane runs " + sel.MasterVersion + "."
-			// Only worth saying where it is true. From 1.35 GKE accepts the
-			// enablement happily; such a cluster is unsupported, not broken,
-			// and quoting an error it would never return sends the user
-			// looking for a problem that is not there.
-			if !sel.BetaAPIsAvailable() {
-				lede += " GKE will not even enable the beta PodCertificate APIs there."
-			}
+		if !sel.SupportedRelease() {
 			paras = []string{
-				lede,
-				"Upgrade its control plane to " + gcp.MinSupportedRelease.String() + " or newer and come back, or [esc] and create a new cluster, made at " + version + " with the APIs on.",
+				"Its control plane runs " + sel.MasterVersion + ".",
+				"Upgrade its control plane, then any node pool below " + floor + ", to " + floor + " or newer and come back.",
 			}
-		default:
-			title = sel.Name + ": the beta PodCertificate APIs are off."
+		} else {
+			pools := sel.PoolsBelowFloor()
+			phrase := "1 node pool runs"
+			if len(pools) > 1 {
+				phrase = fmt.Sprintf("%d node pools run", len(pools))
+			}
+			// The names are wrapped here, between names, to the panel's text
+			// width (its width less the padding): wrapped by the panel they
+			// broke at the hyphens inside them.
 			paras = []string{
-				"[y] has provision turn them on in place, a control-plane update of about ten minutes.",
+				phrase + " below " + floor + ":\n" + strings.Join(poolNameLines(pools, panelW-2, maxPoolNameLines), "\n"),
+				"Upgrade them to " + floor + " or newer and come back.",
 			}
-			// Usually some pool is below 1.37 here, or the cluster would serve
-			// the APIs as GA and be ready. The exception is a control plane
-			// whose version could not be read over pools that are all fine:
-			// not ready, since the control plane might not serve v1, but
-			// there is no pool to replace and none is recorded, so the panel
-			// must not promise provision will list any.
-			switch r := sel.PoolReplacement(); {
-			case len(r.Names) > 0:
-				phrase := "1 node pool runs"
-				if len(r.Names) > 1 {
-					phrase = fmt.Sprintf("%d node pools run", len(r.Names))
-				}
-				paras = append(paras, fmt.Sprintf("%s below %s and must be replaced before Substrate starts; provision shows how.", phrase, gcp.PodCertificateGARelease))
-			case !r.Needed:
-				paras = append(paras, "Its node pools all run "+gcp.PodCertificateGARelease.String()+" or newer and need nothing; only the control plane's version ("+sel.MasterVersion+") could not be read.")
-			default:
-				paras = append(paras, "Its nodes run below "+gcp.PodCertificateGARelease.String()+", so its node pools must be replaced before Substrate starts; provision shows how.")
-			}
-			paras = append(paras, "Or [esc] and create a new cluster, made at "+version+" with the APIs on.")
 		}
+		paras = append(paras, "Or [esc] and create a new cluster, made at "+s.deps.Setup.ClusterVersion+".")
 		// No spacer line above it: at 80×24 that line is the panel's bottom
 		// border.
-		b.WriteString(theme.ErrorPanel.Width(min(w-4, 78)).Render(
+		b.WriteString(theme.ErrorPanel.Width(panelW).Render(
 			theme.Warning.Render(title) + "\n\n" + strings.Join(paras, "\n\n")))
 	default:
 		// Wrapped to the content width rather than broken by hand: at 80
 		// columns the hand-broken lines ran past the edge and were cut.
 		b.WriteString("\n" + theme.Subtle.Width(max(w-2, 20)).Render(
-			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer. Below "+gcp.PodCertificateGARelease.String()+", in the control plane or any node pool, it also needs the beta PodCertificate APIs, "+
-				"which GKE serves only for clusters that opted in; provision turns them on for a cluster without them, "+
-				"and its pools below "+gcp.PodCertificateGARelease.String()+" must then be replaced. New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
+			"Substrate needs "+gcp.MinSupportedRelease.String()+" or newer on the control plane and every node pool. "+
+				"New clusters are created at "+s.deps.Setup.ClusterVersion+"."))
 	}
 	return b.String()
 }

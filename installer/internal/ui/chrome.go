@@ -16,6 +16,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -142,20 +143,29 @@ func (a *App) bottomView() string {
 	if p, ok := a.cur.(execCompProvider); ok && p.logComp() != nil && len(p.logComp().lines) > 0 {
 		hints = append(hints, Hint{"v", "view log"})
 	}
-	hints = append(hints,
-		Hint{"?", "help"},
-		Hint{"/", "commands"},
-		Hint{"ctrl+c", "exit"},
-	)
-	parts := make([]string, 0, len(hints))
-	for _, hint := range hints {
-		parts = append(parts, theme.Key.Render("["+hint.Key+"]")+" "+theme.Subtle.Render(hint.Label))
+	render := func(hints []Hint, sep string) string {
+		parts := make([]string, 0, len(hints))
+		for _, hint := range hints {
+			parts = append(parts, theme.Key.Render("["+hint.Key+"]")+" "+theme.Subtle.Render(hint.Label))
+		}
+		return " " + strings.Join(parts, theme.Fainted.Render(sep))
 	}
-	line := " " + strings.Join(parts, theme.Fainted.Render("  ·  "))
+	help, commands, exit := Hint{"?", "help"}, Hint{"/", "commands"}, Hint{"ctrl+c", "exit"}
+	line := render(append(slices.Clone(hints), help, commands, exit), "  ·  ")
 	// A screen with many keys overflows the terminal and loses the last ones
-	// at the edge; a tighter separator usually brings them back.
+	// at the edge. A tighter separator usually brings them back; where it
+	// does not, as on the reinstall guard at 80 columns, [?] and [/] go
+	// first: they work on every screen, and every other screen's bar shows
+	// them, while the screen's own keys are shown nowhere else. Last, the
+	// separator dots go.
 	if lipgloss.Width(line) > a.width {
-		line = " " + strings.Join(parts, theme.Fainted.Render(" · "))
+		line = render(append(slices.Clone(hints), help, commands, exit), " · ")
+	}
+	if lipgloss.Width(line) > a.width {
+		line = render(append(slices.Clone(hints), exit), " · ")
+	}
+	if lipgloss.Width(line) > a.width {
+		line = render(append(slices.Clone(hints), exit), "  ")
 	}
 	return theme.Fainted.Render(strings.Repeat("─", max(a.width, 1))) + "\n" + line
 }

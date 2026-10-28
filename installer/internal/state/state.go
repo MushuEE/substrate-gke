@@ -210,14 +210,13 @@ const (
 //
 // 1.37 serves the PodCertificate APIs as v1, which Substrate uses from
 // v0.4.0, and its kubelets serve pod certificate projection without the beta
-// gate, so a cluster made this way needs no repair of any kind. Rapid is the
-// only channel that carries 1.37 today. Both are a choice, not a requirement:
-// the advanced track can pick Regular and 1.36, the newest Regular carries.
+// gate, so a cluster made this way needs no repair of any kind. 1.37 is also
+// gcp.MinSupportedRelease, so the version can be raised but not lowered. The
+// channel is a choice: the advanced track can pick Regular, which also
+// carries 1.37.
 //
-// They go together. Leaving the channel unset puts a cluster on GKE's default
-// channel, Regular, which rejects 1.37; leaving the version unset gets that
-// channel's default version, which for Regular is below
-// gcp.MinSupportedRelease.
+// The version must be set explicitly. Leaving it unset gets the channel's
+// default version, which for Regular is below gcp.MinSupportedRelease.
 const (
 	DefaultClusterVersion = "1.37"
 	DefaultReleaseChannel = "rapid"
@@ -278,22 +277,10 @@ type Setup struct {
 	// EnableBetaAPIs records that the chosen existing cluster lacks the beta
 	// PodCertificate APIs, so provision is about to turn them on: a
 	// control-plane update of roughly ten minutes rather than the quick
-	// top-up an existing cluster normally gets. The provision screen words
-	// itself from this, having just told the user to expect it.
+	// top-up an existing cluster normally gets. Substrate does not need them
+	// on a supported cluster, but bootstrap turns them on for every cluster,
+	// so the provision screen says so.
 	EnableBetaAPIs bool
-
-	// BetaAPIsOptional records that the chosen cluster serves the
-	// PodCertificate APIs as GA throughout, so it needs no beta APIs — yet
-	// bootstrap turns them on anyway, on every cluster. Provision says that
-	// rather than announcing an update the cluster screen gave no hint of.
-	BetaAPIsOptional bool
-
-	// ReplacePools is which of the chosen cluster's node pools may not mount
-	// pod certificates (see gcp.Cluster.PoolReplacement). They have to be
-	// replaced before Substrate is turned on, not after: its own control
-	// plane mounts pod certificates, so step 6 would hang on them. Provision
-	// lists them, with the commands, when it finishes.
-	ReplacePools gcp.PoolReplacement
 
 	// ClusterVersion and ReleaseChannel shape a cluster the install creates
 	// and are ignored for one it connects to: bootstrap reads them only on the
@@ -432,12 +419,6 @@ func (s *Setup) SelectCluster(c gcp.Cluster) {
 	s.ClusterDataplaneV2 = c.DataplaneV2
 	s.ClusterFilestoreAddon = c.FilestoreCSIAddon
 	s.EnableBetaAPIs = c.MissingBetaAPIs()
-	s.BetaAPIsOptional = c.ServesPodCertificatesAsGA()
-	// Recorded for a ready cluster too, not only one that is about to get
-	// the APIs: a ready cluster with old pools is most often a re-run after
-	// an earlier one turned the APIs on, and its pools still need replacing
-	// if the user has not done it yet. ReplacePools.Unsure says so.
-	s.ReplacePools = c.PoolReplacement()
 }
 
 // NewCluster records a cluster the run will create, named name, in the
@@ -451,8 +432,6 @@ func (s *Setup) NewCluster(name string) {
 	s.ClusterDataplaneV2 = false
 	s.ClusterFilestoreAddon = false
 	s.EnableBetaAPIs = false
-	s.BetaAPIsOptional = false
-	s.ReplacePools = gcp.PoolReplacement{}
 }
 
 // defaultBucketName derives the snapshot bucket name for a project, cluster,
