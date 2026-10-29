@@ -221,6 +221,7 @@ delete_iam_policy_bindings() {
           storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
           --member="${wi}/${subject}" \
           --role="${role}" \
+          --condition=None \
           --quiet
       done
     done
@@ -231,6 +232,7 @@ delete_iam_policy_bindings() {
         storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
         --member="${transfer}" \
         --role="${role}" \
+        --condition=None \
         --quiet
     done
   fi
@@ -241,6 +243,7 @@ delete_iam_policy_bindings() {
       storage buckets remove-iam-policy-binding "gs://${asset_bucket}" \
       --member="${wi}/atelet" \
       --role=roles/storage.objectViewer \
+      --condition=None \
       --quiet
   fi
 }

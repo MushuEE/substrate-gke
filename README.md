@@ -135,8 +135,7 @@ guest kernel, the guest rootfs and the base kata config — are fetched from GCS
 rather than baked into the worker image. Step 9 (`Choose your sandbox runtime`) reports
 whether the cluster you selected has a KVM-capable node pool, and on choosing Micro-VM it
 runs upstream's `hack/install-microvm-deps.sh --install` to assemble those five assets,
-upload them under `kata-assets/` (in the snapshot bucket up to Substrate v0.5.0, in
-`<bucket>-assets` after), and apply a cluster-wide `SandboxConfig` named `microvm` that
+upload them under `kata-assets/` in `<bucket>-assets`, and apply a cluster-wide `SandboxConfig` named `microvm` that
 points at them.
 
 A WorkerPool then names it in `spec.sandboxClasses`:

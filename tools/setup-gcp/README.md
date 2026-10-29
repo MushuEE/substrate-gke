@@ -330,7 +330,7 @@ is assigned to the node
 and the nodes need no snapshot access of their own
 ([#3037](https://github.com/agent-substrate/substrate/pull/3037),
 [#3042](https://github.com/agent-substrate/substrate/pull/3042)). This is what
-Substrate's [threat model](https://github.com/agent-substrate/substrate/blob/main/docs/threat-model.md) relies on for T-08 (a template author
+Substrate's [threat model](https://github.com/agent-substrate/substrate/blob/v0.6.0/docs/threat-model.md) relies on for T-08 (a template author
 reaching buckets through atelet) and T-36 (a compromised node reading every
 snapshot), and these grants match agent-substrate/substrate's own setup-gcp.
 
@@ -391,9 +391,9 @@ above:
 gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
   --member="${ATELET}" --role=roles/storage.objectAdmin --condition=None
 gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
-  --member="${ATELET}" --role=roles/storage.objectAdmin
+  --member="${ATELET}" --role=roles/storage.objectAdmin --condition=None
 gcloud storage buckets remove-iam-policy-binding "gs://${BUCKET_NAME}" \
-  --member="${ATELET}" --role=roles/storage.bucketViewer
+  --member="${ATELET}" --role=roles/storage.bucketViewer --condition=None
 ```
 
 ### 5. Create Dashboards

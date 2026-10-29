@@ -246,6 +246,34 @@ func TestAteletProjectGrantHasNoStorageRole(t *testing.T) {
 	}
 }
 
+// A set ATELET_SNAPSHOT_ACCESS is ignored with a warning, whatever its value.
+func TestRemovedAteletSnapshotAccessEnvWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		set      bool
+		wantWarn bool
+	}{
+		{"unset", false, false},
+		{"set", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("ATELET_SNAPSHOT_ACCESS", "true")
+			}
+			var buf bytes.Buffer
+			restore := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(restore) })
+
+			warnRemovedAteletSnapshotAccessEnv()
+
+			if got := strings.Contains(buf.String(), "Ignoring ATELET_SNAPSHOT_ACCESS"); got != tc.wantWarn {
+				t.Errorf("warned = %t, want %t (log: %q)", got, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
 // --atelet-snapshot-access is removed but still parses, so scripts that pass
 // it keep working.
 func TestRemovedAteletSnapshotAccessFlagStillParses(t *testing.T) {
