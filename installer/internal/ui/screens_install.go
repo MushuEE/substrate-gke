@@ -233,7 +233,7 @@ func (s *controlPlaneScreen) View(w int) string {
 		subtitle = "Installs CRDs, the API server, controller, atenet, and atelet from\n" + s.deps.Setup.ImageSummary() + "."
 	}
 	subtitle += "\nEgress credential provider: " + snapshot.CredentialProvider() + " (set ATE_CREDENTIAL_PROVIDER to change it)."
-	subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary() + "."
+	subtitle += "\nIngress router allowlist: " + snapshot.IngressAllowlistSummary(s.deps.Setup) + "."
 	b.WriteString(theme.Subtle.Render(subtitle) + "\n\n")
 	b.WriteString(s.comp.view(w))
 
@@ -1073,7 +1073,7 @@ func (s *completeScreen) View(w int) string {
 		}
 	}
 	panelWidth := min(w-4, 92)
-	if note := s.deps.Builder.RouterNote(); note != "" {
+	if note := s.deps.Builder.RouterNote(st); note != "" {
 		// Wrapped to the panel, or Bubble Tea's renderer cuts it at the edge.
 		next += "\n" + theme.Subtle.Width(max(panelWidth-4, 20)).Render(note)
 	}

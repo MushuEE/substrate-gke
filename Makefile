@@ -12,11 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: run doctor dry-run teardown build test fmt verify screenshots
+.PHONY: run run-demo doctor dry-run teardown build test fmt verify screenshots
 
-# Launch the interactive installer.
+# Launch the interactive installer. It asks for the SPIFFE IDs of the clients
+# the ingress router admits, and deploys no demo.
 run:
 	cd installer && go run .
+
+# Launch the installer for a demo: it ends by deploying the counter demo, and
+# allows the demo's driver pods on the ingress router on your behalf.
+run-demo:
+	cd installer && go run . --demo
 
 # Delete the GCP resources a previous install created. The values are your
 # wizard answers; the installer's exit summary prints this exact invocation.

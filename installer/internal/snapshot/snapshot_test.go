@@ -1831,34 +1831,34 @@ func TestFetchLabelNamesTheRevision(t *testing.T) {
 	}
 }
 
-// The allowlist is the demo drivers' identities, then the caller's, trimmed
-// and without duplicates, because ate-setup reads one value.
-func TestIngressAllowedSPIFFEIDsAppendsTheCallers(t *testing.T) {
-	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", "")
-	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, DemoClientSPIFFEIDs) {
-		t.Errorf("without the variable: %v, want the demo drivers %v", got, DemoClientSPIFFEIDs)
-	}
+// Client IDs are entered comma-separated: trimmed, empty entries and
+// duplicates dropped, each a spiffe:// URI with a trust domain, and at least
+// one, since ate-setup refuses an empty allowlist.
+func TestParseSPIFFEIDs(t *testing.T) {
 	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
-	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", " "+frontend+", ,"+DemoClientSPIFFEIDs[0])
-	want := append(slices.Clone(DemoClientSPIFFEIDs), frontend)
-	if got := IngressAllowedSPIFFEIDs(); !slices.Equal(got, want) {
-		t.Errorf("with the variable: %v, want %v", got, want)
+	const jobs = "spiffe://cluster.local/ns/shop/sa/jobs"
+	ids, err := ParseSPIFFEIDs(" " + frontend + ", ," + jobs + "," + frontend)
+	if err != nil || !slices.Equal(ids, []string{frontend, jobs}) {
+		t.Errorf("ParseSPIFFEIDs = %v, %v; want %v", ids, err, []string{frontend, jobs})
 	}
-	if got := IngressAllowlistSummary(); !strings.Contains(got, "plus 1 from ATE_INGRESS_ALLOWED_SPIFFE_IDS") {
-		t.Errorf("summary = %q", got)
+	for _, bad := range []string{"", " , ", "cluster.local/ns/shop/sa/frontend", "https://cluster.local/ns/a/sa/b", "spiffe:///ns/a/sa/b", "spiffe://cluster.local/ns/a/sa/b?x=1"} {
+		if _, err := ParseSPIFFEIDs(bad); err == nil {
+			t.Errorf("ParseSPIFFEIDs(%q) accepted it", bad)
+		}
 	}
 }
 
-// The control-plane deploy carries the joined list, replacing whatever the
-// caller exported.
-func TestDeployCarriesTheIngressAllowlist(t *testing.T) {
+// The control-plane deploy passes exactly the allowlist the IngressClients
+// step set, whatever the caller exported: no merge.
+func TestDeployCarriesTheEnteredIngressAllowlist(t *testing.T) {
 	const frontend = "spiffe://cluster.local/ns/shop/sa/frontend"
-	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", frontend)
-	joined := strings.Join(append(slices.Clone(DemoClientSPIFFEIDs), frontend), ",")
+	t.Setenv("ATE_INGRESS_ALLOWED_SPIFFE_IDS", "spiffe://cluster.local/ns/old/sa/default")
 	st := testSetup(t)
+	st.IngressAllowedSPIFFEIDs = []string{frontend}
 	b := NewBuilder(filepath.Join(t.TempDir(), "substrate-x"), true)
-	if env := b.DeployAteSystem(st).Env; !slices.Contains(env, "ATE_INGRESS_ALLOWED_SPIFFE_IDS="+joined) {
-		t.Errorf("deploy env lacks the joined allowlist: %v", env)
+	env := b.DeployAteSystem(st).Env
+	if !slices.Contains(env, "ATE_INGRESS_ALLOWED_SPIFFE_IDS="+frontend) {
+		t.Errorf("deploy env lacks the entered allowlist: %v", env)
 	}
 }
 
@@ -1875,7 +1875,7 @@ func TestNextStepsFollowTheRouter(t *testing.T) {
 	if lead != "" || strings.Contains(joined, "curl ") || !strings.Contains(joined, "kubectl ate create actor my-counter-1 -a ate-demo-counter --template counter") {
 		t.Errorf("Envoy without a driver: lead %q, demo %v", lead, demo)
 	}
-	if note := b.RouterNote(); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
+	if note := b.RouterNote(st); !strings.Contains(note, "allowlist") || !strings.Contains(note, b.RouterAuthURL()) {
 		t.Errorf("Envoy router note = %q", note)
 	}
 

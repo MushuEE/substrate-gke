@@ -63,6 +63,8 @@ func main() {
 		DryRun:  true,
 		LogPath: "~/.cache/substrate-gke/logs/installer.log",
 	}
+	// A demo run, so the completion screen shows the demo's next steps.
+	deps.Setup.DemoMode = true
 	// Bootstrap's command line shows the resolved setup-gcp directory. Use
 	// install.sh's default clone location ($HOME/.substrate-gke) with a
 	// placeholder home directory, so the screenshot shows neither this
@@ -104,7 +106,8 @@ func main() {
 	press(app, "1", "enter") // the clean cluster → provision runs (dry)
 	shot(out, "provision", app)
 
-	press(app, "enter")      // provision → control plane
+	press(app, "enter")      // provision → ingress clients
+	press(app, "enter")      // the demo drivers' IDs → control plane
 	press(app, "enter")      // control plane → filestore CSI
 	press(app, "s")          // skip filestore
 	press(app, "s")          // skip autoscaling → sandbox runtime
