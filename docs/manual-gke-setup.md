@@ -43,9 +43,9 @@ You need two checkouts:
    On a fresh project this also creates the Workload Identity IAM grants that
    ate-api-server and atelet depend on. See
    [what `create iam` actually grants](../tools/setup-gcp/README.md#what-create-iam-actually-grants)
-   to audit them or apply them by hand. `--atelet-snapshot-access` (on by
-   default) keeps atelet's snapshot bucket roles, which Substrate releases up
-   to v0.5.0 need; turn it off for later releases.
+   to audit them or apply them by hand. atelet gets no storage role on the
+   project or the snapshot bucket; see that section for how to remove grants
+   an older setup left behind.
 
    If you bring your own cluster, its control plane and every node pool must
    run GKE 1.37 or later, which serves the PodCertificateRequest and

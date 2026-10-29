@@ -212,8 +212,9 @@ delete_iam_policy_bindings() {
   if bucket_gone "${BUCKET_NAME}"; then
     echo "(gs://${BUCKET_NAME} already deleted; its bindings went with it)"
   else
-    # atelet's snapshot bucket roles exist only on installs made with
-    # --atelet-snapshot-access; a missing binding counts as already deleted.
+    # atelet's snapshot bucket roles exist only on projects set up before
+    # Substrate v0.6.0 or with the removed --atelet-snapshot-access; a missing
+    # binding counts as already deleted.
     for subject in atelet ate-api-server; do
       for role in roles/storage.objectAdmin roles/storage.bucketViewer; do
         gcloud_step "delete bucket IAM binding (${subject}, ${role})" \
