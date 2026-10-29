@@ -39,7 +39,10 @@ GKE packaging for [Agent Substrate](https://github.com/agent-substrate/substrate
 | A GCP project with billing | Checked on the project step, which can also enable the GKE API for you |
 
 ```bash
-# One-line install and launch:
+# One-line install and launch, ending with the counter demo (make run-demo):
+curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash -s -- --demo
+
+# Or install for your own workloads, entering your clients' SPIFFE IDs (make run):
 curl -sSL https://raw.githubusercontent.com/ai-on-gke/substrate-gke/main/install.sh | bash
 ```
 
@@ -57,7 +60,7 @@ make run-demo     # or: install and deploy the counter demo
 
 | Command | What it does |
 |---|---|
-| `make run-demo` | Installs, then deploys the counter demo; the demo's driver pods are allowed on the ingress router on your behalf |
+| `make run-demo` | Installs, then deploys the counter demo; the demo's driver pods are allowed on the ingress router on your behalf. The one-liner's `bash -s -- --demo` does the same |
 | `make doctor` | Preflight checks only — no GCP calls |
 | `make dry-run` | Walks the full wizard without touching GCP |
 
