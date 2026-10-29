@@ -455,9 +455,12 @@ Micro-VM workers fetch their sandbox binaries (cloud-hypervisor, virtiofsd,
 the guest kernel and the guest rootfs) from the asset bucket, `BUCKET_NAME-assets`,
 at boot. [`install-microvm-deps.sh`](install-microvm-deps.sh) puts them there
 and applies the cluster-wide `microvm` SandboxConfig that points at them. The
-installer runs it on the Micro-VM runtime step. It replaces the GCS path of
+installer runs it on the Micro-VM runtime step. It does what the GCS branch of
 agent-substrate/substrate's `hack/install-microvm-deps.sh` and
-`hack/microvm-assets/stage-to-gcs.sh` ([#82](https://github.com/ai-on-gke/substrate-gke/issues/82)).
+`hack/microvm-assets/stage-to-gcs.sh` does, so the installer does not depend on
+that dev script ([#82](https://github.com/ai-on-gke/substrate-gke/issues/82)).
+The assets themselves are not specific to GKE; only the upload to GCS and the
+`BUCKET_NAME-assets` bucket are.
 
 It runs against a Substrate checkout, from which it takes the
 provider-neutral pieces: `hack/microvm-assets/assemble.sh`, which downloads the
