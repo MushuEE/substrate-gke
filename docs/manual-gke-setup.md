@@ -13,7 +13,9 @@ You need two checkouts:
 
 * this repository, for `tools/setup-gcp` and `tools/setup-gcp/teardown.sh`;
 * [agent-substrate/substrate](https://github.com/agent-substrate/substrate) at
-  the revision you want to install, for `cmd/ate-setup`.
+  the revision you want to install, for `cmd/ate-setup`. It must be
+  [v0.6.0](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) or later: since [#92](https://github.com/ai-on-gke/substrate-gke/pull/92), setup-gcp's IAM grants support only
+  Substrate releases with per-actor snapshot credentials.
 
 ## Provision and deploy
 

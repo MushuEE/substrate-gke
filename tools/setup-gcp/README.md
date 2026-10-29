@@ -8,8 +8,14 @@ This tool was moved here from `tools/setup-gcp` in
 imported from upstream commit `f69f41d3` and last synced with upstream commit
 `ed3f2e4f`. Upstream is removing its copy, so new changes belong here. It is a
 separate Go module; run the commands below from the root of this repository.
-The installer's provisioning step runs this copy, whatever Substrate revision
-it installs.
+The installer's provisioning step runs this copy.
+
+> [!IMPORTANT]
+> **setup-gcp supports Substrate [v0.6.0](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) and later only**, since [#92](https://github.com/ai-on-gke/substrate-gke/pull/92). Its IAM
+> grants assume per-actor snapshot credentials, which first shipped in v0.6.0,
+> and give atelet no storage role on the project or the snapshot bucket. On an
+> earlier release, every suspend and resume fails with `403`. See
+> [What `create iam` actually grants](#what-create-iam-actually-grants).
 
 ## Overview
 
