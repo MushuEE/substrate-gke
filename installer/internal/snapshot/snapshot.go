@@ -58,12 +58,12 @@ const (
 	// images, which have to have been built from it.
 	//
 	// It is a release commit rather than a commit of main: the commit
-	// upstream's v0.6.0 tag names, which is also the head of its release-0.6
-	// branch.
+	// upstream's v1.0.0-rc.1 tag names, the first release with published
+	// images (ghcr.io/agent-substrate/substrate).
 	//
 	// Bump this to move to a newer Substrate, and update MinGoVersion to
 	// match the `go` directive in that revision's go.mod.
-	Commit = "d3f2363590a11b2f50489971985ba033b4c9eff7"
+	Commit = "f86fde9dfb5424c8d16f613de80469bdbef06541"
 
 	// MinGoVersion mirrors the `go` directive in go.mod at Commit. The doctor
 	// prefers the real go.mod once the tree is on disk and falls back to this
@@ -71,13 +71,13 @@ const (
 	MinGoVersion = "1.27.0"
 )
 
-// There is no default image registry. The GKE release registry
-// (us-docker.pkg.dev/gke-substrate-release/substrate) is deprecated and has no
-// images for Commit, and no registry replaces it yet, so a pre-built install
-// names the registry and tag of images published for Commit, or for whatever
-// commit it gives the images step. A registry is read-only to an install:
-// images are pulled from it and never pushed to it, which is why installing
-// pre-built images leaves KO_DOCKER_REPO out of the picture.
+// There is no default image registry yet. Upstream publishes Commit's images
+// to ghcr.io/agent-substrate/substrate at v1.0.0-rc.1, but the images step
+// does not offer them, so a pre-built install names the registry and tag of
+// images published for Commit, or for whatever commit it gives the images
+// step. A registry is read-only to an install: images are pulled from it and
+// never pushed to it, which is why installing pre-built images leaves
+// KO_DOCKER_REPO out of the picture.
 
 // TransferGSAName is the snapshot transfer service account's name: what
 // setup-gcp creates (its DefaultTransferGSAName) and what ate-setup is given

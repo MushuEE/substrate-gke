@@ -277,16 +277,17 @@ The images step chooses between two ways of getting the Substrate control-plane 
 | | **Pre-built images** | **Build from source** |
 |---|---|---|
 | **You provide** | Registry and tag (required), and the commit the images were built from | A revision: branch, tag, or full commit SHA |
-| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag | The pin, upstream's [`v0.6.0`](https://github.com/agent-substrate/substrate/releases/tag/v0.6.0) tag |
+| **Default value** | None for registry and tag; the commit defaults to the pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag | The pin, upstream's [`v1.0.0-rc.1`](https://github.com/agent-substrate/substrate/releases/tag/v1.0.0-rc.1) tag |
 | **Needs a registry of yours?** | No — pull-only | Yes — built with [ko](https://ko.build) and pushed there |
 | **Best for** | Images already published for the commit you install | No published images, or a branch or commit of your own |
 
 > [!NOTE]
-> No registry of pre-built images is published at the moment. The GKE release
-> registry (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated
-> and has no images for v0.6.0; a replacement will be published in a different
-> registry. Until then, a pre-built install needs images you or your team
-> published, and building from source is the way to install the pin.
+> Upstream publishes the pin's images to `ghcr.io/agent-substrate/substrate`
+> at tag `v1.0.0-rc.1`; give those as the registry and tag to install the pin
+> pre-built. The images step doesn't offer them by default yet. Releases don't
+> publish the demo images, so with these the counter demo step fails; skip it,
+> or build from source to run the demo. The GKE release registry
+> (`us-docker.pkg.dev/gke-substrate-release/substrate`) is deprecated.
 
 For source builds using the default registry, the installer creates `ate-images` at `<region>-docker.pkg.dev/<project>/ate-images`. The region follows the selected cluster. Advanced mode can override the repository name or use an existing image registry. Pre-built installs and custom image registries skip repository creation.
 
